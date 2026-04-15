@@ -37,9 +37,12 @@ these in shell config to keep the password out of `ps`.
 ## Installation
 
 ```sh
-go build -o tplink-m7010 .
-install -m755 tplink-m7010 ~/.local/bin/
+make install            # builds + installs to ~/.local/bin
+make install-waybar     # drops the waybar wrapper script in ~/.config/waybar/scripts
 ```
+
+Other useful targets: `make build`, `make run`, `make raw`, `make clean`,
+`make vet`, `make tidy`.
 
 ## Waybar integration
 
