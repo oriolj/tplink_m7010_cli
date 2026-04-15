@@ -23,12 +23,14 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math/big"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -36,6 +38,18 @@ import (
 const (
 	defaultAddr    = "192.168.0.1"
 	defaultTimeout = 5 * time.Second
+
+	authPath = "/cgi-bin/auth_cgi"
+	webPath  = "/cgi-bin/web_cgi"
+
+	moduleAuth     = "authenticator"
+	moduleStatus   = "status"
+	moduleFlowStat = "flowstat"
+
+	actionLoad   = 0
+	actionGet    = 0
+	actionLogin  = 1
+	actionLogout = 3
 )
 
 type Client struct {
@@ -56,19 +70,21 @@ func NewClient(addr string, debug bool) *Client {
 		addr = defaultAddr
 	}
 	return &Client{
-		baseURL: "http://" + addr,
-		debug:   debug,
-		httpClient: &http.Client{
-			Timeout: defaultTimeout,
-		},
+		baseURL:    "http://" + addr,
+		debug:      debug,
+		httpClient: &http.Client{Timeout: defaultTimeout},
+	}
+}
+
+func (c *Client) debugf(format string, args ...any) {
+	if c.debug {
+		fmt.Printf("[DEBUG] "+format, args...)
 	}
 }
 
 // postRaw sends a raw POST and returns the raw response body.
 func (c *Client) postRaw(endpoint string, body []byte) ([]byte, error) {
-	if c.debug {
-		fmt.Printf("[DEBUG] POST %s body=%s\n", endpoint, string(body))
-	}
+	c.debugf("POST %s body=%s\n", endpoint, string(body))
 
 	resp, err := c.httpClient.Post(c.baseURL+endpoint, "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -81,14 +97,10 @@ func (c *Client) postRaw(endpoint string, body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
-	if c.debug {
-		fmt.Printf("[DEBUG] Response raw: %s\n", string(data))
-	}
-
+	c.debugf("Response raw: %s\n", string(data))
 	return data, nil
 }
 
-// decodeBase64JSON decodes a base64-encoded JSON response.
 func decodeBase64JSON(data []byte) (map[string]any, error) {
 	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
 	if err != nil {
@@ -106,17 +118,16 @@ func decodeBase64JSON(data []byte) (map[string]any, error) {
 func (c *Client) Login(password string) error {
 	c.password = password
 
-	// Step 1: Request nonce + RSA keys.
-	// The M7010 expects {"data": base64(json_payload)}.
+	// Step 1: request nonce + RSA keys. Body is {"data": base64(json)}.
 	payload, _ := json.Marshal(map[string]any{
-		"module": "authenticator",
-		"action": 0,
+		"module": moduleAuth,
+		"action": actionLoad,
 	})
 	reqBody, _ := json.Marshal(map[string]string{
 		"data": base64.StdEncoding.EncodeToString(payload),
 	})
 
-	respData, err := c.postRaw("/cgi-bin/auth_cgi", reqBody)
+	respData, err := c.postRaw(authPath, reqBody)
 	if err != nil {
 		return fmt.Errorf("request nonce: %w", err)
 	}
@@ -126,43 +137,31 @@ func (c *Client) Login(password string) error {
 		return fmt.Errorf("decode nonce response: %w", err)
 	}
 
-	if c.debug {
-		fmt.Printf("[DEBUG] Nonce response: %v\n", nonceResp)
-	}
+	c.debugf("Nonce response: %v\n", nonceResp)
 
 	nonce, _ := nonceResp["nonce"].(string)
 	rsaPubKeyHex, _ := nonceResp["rsaPubKey"].(string)
 	rsaModHex, _ := nonceResp["rsaMod"].(string)
-	seqNumStr, _ := nonceResp["seqNum"].(string)
 
 	if nonce == "" || rsaModHex == "" || rsaPubKeyHex == "" {
 		return fmt.Errorf("incomplete nonce response (nonce=%q, rsaMod=%q, rsaPubKey=%q): %v",
 			nonce, rsaModHex, rsaPubKeyHex, nonceResp)
 	}
 
-	// Parse RSA keys from hex
 	c.rsaMod = new(big.Int)
 	c.rsaMod.SetString(rsaModHex, 16)
 	c.rsaPubKey = new(big.Int)
 	c.rsaPubKey.SetString(rsaPubKeyHex, 16)
 
-	// Parse sequence number (comes as float64 from JSON or as string)
-	if seqNumStr != "" {
-		fmt.Sscanf(seqNumStr, "%d", &c.seqNum)
-	}
-	if c.seqNum == 0 {
-		// Might be a float64 in the map directly
-		if sn, ok := nonceResp["seqNum"].(float64); ok {
-			c.seqNum = int(sn)
-		}
-	}
+	c.seqNum = intFrom(nonceResp["seqNum"])
 
-	// Step 2: Generate random AES key and IV (16 bytes each)
+	// Step 2: generate random AES key/IV (ASCII digits — the PHP reference
+	// implementation does the same and some firmware paths may not handle
+	// high bytes cleanly).
 	c.aesKey = make([]byte, 16)
 	c.aesIV = make([]byte, 16)
 	rand.Read(c.aesKey)
 	rand.Read(c.aesIV)
-	// Use only printable ASCII chars for compatibility (like the PHP impl uses digits)
 	for i := range c.aesKey {
 		c.aesKey[i] = '0' + (c.aesKey[i] % 10)
 	}
@@ -170,14 +169,13 @@ func (c *Client) Login(password string) error {
 		c.aesIV[i] = '0' + (c.aesIV[i] % 10)
 	}
 
-	// Step 3: Compute digest = md5(password + ":" + nonce)
+	// Step 3: digest = md5(password + ":" + nonce). The colon matters.
 	digestHash := md5.Sum([]byte(password + ":" + nonce))
-	digest := fmt.Sprintf("%x", digestHash)
+	digest := hex.EncodeToString(digestHash[:])
 
-	// Step 4: AES encrypt the login payload
 	loginPayload, _ := json.Marshal(map[string]any{
-		"module": "authenticator",
-		"action": 1,
+		"module": moduleAuth,
+		"action": actionLogin,
 		"digest": digest,
 	})
 
@@ -186,54 +184,47 @@ func (c *Client) Login(password string) error {
 		return fmt.Errorf("aes encrypt login: %w", err)
 	}
 
-	// Step 5: Build and RSA encrypt the signature
-	// Must match PHP's http_build_query insertion order: key, iv, h, s
+	// Sign string order is load-bearing: the firmware position-parses it, so
+	// url.Values.Encode() (alphabetical) returns garbage. Build it manually.
 	h := md5.Sum([]byte("admin" + password))
 	s := c.seqNum + len(encryptedData)
-
-	signStr := fmt.Sprintf("key=%s&iv=%s&h=%x&s=%d",
+	signStr := fmt.Sprintf("key=%s&iv=%s&h=%s&s=%d",
 		url.QueryEscape(string(c.aesKey)),
 		url.QueryEscape(string(c.aesIV)),
-		h, s)
+		hex.EncodeToString(h[:]), s)
 
-	if c.debug {
-		fmt.Printf("[DEBUG] Sign plaintext: %s\n", signStr)
-		fmt.Printf("[DEBUG] AES key=%s iv=%s\n", string(c.aesKey), string(c.aesIV))
-	}
+	c.debugf("Sign plaintext: %s\n", signStr)
+	c.debugf("AES key=%s iv=%s\n", string(c.aesKey), string(c.aesIV))
 
 	sign, err := c.rsaEncrypt([]byte(signStr))
 	if err != nil {
 		return fmt.Errorf("rsa encrypt sign: %w", err)
 	}
 
-	// Step 6: Send encrypted auth request
 	authReqBody, _ := json.Marshal(map[string]string{
 		"data": encryptedData,
 		"sign": sign,
 	})
 
-	authRespData, err := c.postRaw("/cgi-bin/auth_cgi", authReqBody)
+	authRespData, err := c.postRaw(authPath, authReqBody)
 	if err != nil {
 		return fmt.Errorf("auth request: %w", err)
 	}
 
-	// Response is AES encrypted
 	authJSON, err := c.aesDecrypt(strings.TrimSpace(string(authRespData)))
 	if err != nil {
 		return fmt.Errorf("decrypt auth response: %w", err)
 	}
 
-	if c.debug {
-		fmt.Printf("[DEBUG] Auth response decrypted: %s\n", string(authJSON))
-	}
+	c.debugf("Auth response decrypted: %s\n", string(authJSON))
 
 	var authResp map[string]any
 	if err := json.Unmarshal(authJSON, &authResp); err != nil {
 		return fmt.Errorf("parse auth response: %w", err)
 	}
 
-	token, ok := authResp["token"].(string)
-	if !ok || token == "" {
+	token, _ := authResp["token"].(string)
+	if token == "" {
 		if code, ok := authResp["result"].(float64); ok && code != 0 {
 			return fmt.Errorf("login failed (code %.0f): wrong password?", code)
 		}
@@ -244,19 +235,19 @@ func (c *Client) Login(password string) error {
 	return nil
 }
 
+// Logout is best-effort — the modem ages out tokens on its own if we don't.
 func (c *Client) Logout() {
 	if c.token == "" {
 		return
 	}
-	c.encryptedRequest("/cgi-bin/auth_cgi", map[string]any{
-		"module": "authenticator",
-		"action": 3,
+	c.encryptedRequest(authPath, map[string]any{
+		"module": moduleAuth,
+		"action": actionLogout,
 		"token":  c.token,
 	})
 	c.token = ""
 }
 
-// encryptedRequest sends an AES+RSA encrypted request and returns the decrypted JSON response.
 func (c *Client) encryptedRequest(endpoint string, payload map[string]any) (map[string]any, error) {
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
@@ -270,8 +261,7 @@ func (c *Client) encryptedRequest(endpoint string, payload map[string]any) (map[
 
 	h := md5.Sum([]byte("admin" + c.password))
 	s := c.seqNum + len(encryptedData)
-
-	signStr := fmt.Sprintf("h=%x&s=%d", h, s)
+	signStr := fmt.Sprintf("h=%s&s=%d", hex.EncodeToString(h[:]), s)
 
 	sign, err := c.rsaEncrypt([]byte(signStr))
 	if err != nil {
@@ -293,9 +283,7 @@ func (c *Client) encryptedRequest(endpoint string, payload map[string]any) (map[
 		return nil, fmt.Errorf("decrypt response: %w", err)
 	}
 
-	if c.debug {
-		fmt.Printf("[DEBUG] Decrypted response: %s\n", string(decrypted))
-	}
+	c.debugf("Decrypted response: %s\n", string(decrypted))
 
 	var result map[string]any
 	if err := json.Unmarshal(decrypted, &result); err != nil {
@@ -306,24 +294,35 @@ func (c *Client) encryptedRequest(endpoint string, payload map[string]any) (map[
 
 // --- AES-128-CBC ---
 
+func pkcs7Pad(b []byte, blockSize int) []byte {
+	padLen := blockSize - (len(b) % blockSize)
+	padded := make([]byte, len(b)+padLen)
+	copy(padded, b)
+	for i := len(b); i < len(padded); i++ {
+		padded[i] = byte(padLen)
+	}
+	return padded
+}
+
+func pkcs7Unpad(b []byte, blockSize int) []byte {
+	if len(b) == 0 {
+		return b
+	}
+	padLen := int(b[len(b)-1])
+	if padLen <= 0 || padLen > blockSize {
+		return b
+	}
+	return b[:len(b)-padLen]
+}
+
 func (c *Client) aesEncrypt(plaintext []byte) (string, error) {
 	block, err := aes.NewCipher(c.aesKey)
 	if err != nil {
 		return "", err
 	}
-
-	// PKCS7 padding
-	padLen := aes.BlockSize - (len(plaintext) % aes.BlockSize)
-	padded := make([]byte, len(plaintext)+padLen)
-	copy(padded, plaintext)
-	for i := len(plaintext); i < len(padded); i++ {
-		padded[i] = byte(padLen)
-	}
-
+	padded := pkcs7Pad(plaintext, aes.BlockSize)
 	ciphertext := make([]byte, len(padded))
-	mode := cipher.NewCBCEncrypter(block, c.aesIV)
-	mode.CryptBlocks(ciphertext, padded)
-
+	cipher.NewCBCEncrypter(block, c.aesIV).CryptBlocks(ciphertext, padded)
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
@@ -332,39 +331,30 @@ func (c *Client) aesDecrypt(ciphertextB64 string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("base64 decode ciphertext: %w", err)
 	}
-
+	if len(ciphertext)%aes.BlockSize != 0 {
+		return nil, fmt.Errorf("ciphertext length %d not multiple of block size", len(ciphertext))
+	}
 	block, err := aes.NewCipher(c.aesKey)
 	if err != nil {
 		return nil, err
 	}
-
-	if len(ciphertext)%aes.BlockSize != 0 {
-		return nil, fmt.Errorf("ciphertext length %d not multiple of block size", len(ciphertext))
-	}
-
 	plaintext := make([]byte, len(ciphertext))
-	mode := cipher.NewCBCDecrypter(block, c.aesIV)
-	mode.CryptBlocks(plaintext, ciphertext)
-
-	// Remove PKCS7 padding
-	if len(plaintext) > 0 {
-		padLen := int(plaintext[len(plaintext)-1])
-		if padLen > 0 && padLen <= aes.BlockSize {
-			plaintext = plaintext[:len(plaintext)-padLen]
-		}
-	}
-
-	return plaintext, nil
+	cipher.NewCBCDecrypter(block, c.aesIV).CryptBlocks(plaintext, ciphertext)
+	return pkcs7Unpad(plaintext, aes.BlockSize), nil
 }
 
-// --- RSA PKCS1v15 (manual, the M7010 uses a 512-bit key which Go rejects) ---
-// phpseclib auto-chunks messages longer than keyLen-11, so we do the same.
+// --- RSA PKCS1v15 ---
+//
+// Hand-rolled because Go's crypto/rsa refuses keys <1024 bits (and
+// GODEBUG=rsa1024min=0 only relaxes the 1024 floor, not below it) — the
+// M7010 ships a 512-bit key. phpseclib auto-chunks messages longer than
+// keyLen-11, so we mirror that.
 
 func (c *Client) rsaEncrypt(plaintext []byte) (string, error) {
 	n := c.rsaMod
 	e := c.rsaPubKey
 	keyLen := (n.BitLen() + 7) / 8
-	chunkSize := keyLen - 11 // max plaintext per PKCS1v15 block
+	chunkSize := keyLen - 11
 
 	var result []byte
 	for i := 0; i < len(plaintext); i += chunkSize {
@@ -372,22 +362,19 @@ func (c *Client) rsaEncrypt(plaintext []byte) (string, error) {
 		if end > len(plaintext) {
 			end = len(plaintext)
 		}
-		chunk := plaintext[i:end]
-
-		encrypted, err := rsaEncryptBlock(chunk, n, e, keyLen)
+		encrypted, err := rsaEncryptBlock(plaintext[i:end], n, e, keyLen)
 		if err != nil {
 			return "", err
 		}
 		result = append(result, encrypted...)
 	}
 
-	return fmt.Sprintf("%x", result), nil
+	return hex.EncodeToString(result), nil
 }
 
 func rsaEncryptBlock(msg []byte, n, e *big.Int, keyLen int) ([]byte, error) {
 	// PKCS1v15: 0x00 || 0x02 || random_nonzero_padding || 0x00 || message
 	padded := make([]byte, keyLen)
-	padded[0] = 0x00
 	padded[1] = 0x02
 	psLen := keyLen - len(msg) - 3
 	ps := padded[2 : 2+psLen]
@@ -399,7 +386,6 @@ func rsaEncryptBlock(msg []byte, n, e *big.Int, keyLen int) ([]byte, error) {
 			}
 		}
 	}
-	padded[2+psLen] = 0x00
 	copy(padded[3+psLen:], msg)
 
 	m := new(big.Int).SetBytes(padded)
@@ -417,45 +403,37 @@ func rsaEncryptBlock(msg []byte, n, e *big.Int, keyLen int) ([]byte, error) {
 // --- Status ---
 
 type Status struct {
-	// Device
 	Model    string
 	Firmware string
 	Operator string
 
-	// Network
-	NetworkType    string // "4G", "3G", "2G", "No Service"
-	NetworkTypeRaw int
+	NetworkType    string
 	Band           int
 	ConnectStatus  int
-	SignalStrength int // 0-5 (from API, but M7010 reports 0 always)
-	RSRP           int // dBm, actual signal metric
-	RSRQ           int // dB
+	SignalStrength int // 0-5; firmware reports 0, we derive from RSRP
+	RSRP           int // dBm
+	RSRQ           int
 	RSSI           int
 	SNR            int
 	WanIP          string
 
-	// Battery
 	BatteryPercent  int
 	BatteryCharging bool
 
-	// Speed
 	TxSpeed string
 	RxSpeed string
 
-	// Data usage
-	TotalBytes      float64 // total since last reset
+	TotalBytes      float64
 	DailyBytes      float64
-	AdjustedBytes   float64 // adjusted statistics from flowstat
+	AdjustedBytes   float64
 	MonthLimitBytes float64
 	PaymentDay      int
 	ConnectedDevices int
 
-	// Raw responses for debugging
 	RawStatus   map[string]any
 	RawFlowStat map[string]any
 }
 
-// networkTypeStr maps the numeric networkType to a human-readable string.
 func networkTypeStr(t int) string {
 	switch t {
 	case 0:
@@ -473,7 +451,6 @@ func networkTypeStr(t int) string {
 	}
 }
 
-// rsrpToSignal converts RSRP (dBm) to a 0-5 signal bar scale.
 func rsrpToSignal(rsrp int) int {
 	switch {
 	case rsrp >= -80:
@@ -496,9 +473,9 @@ func (c *Client) GetStatus() (*Status, error) {
 		return nil, fmt.Errorf("not logged in")
 	}
 
-	resp, err := c.encryptedRequest("/cgi-bin/web_cgi", map[string]any{
-		"module": "status",
-		"action": 0,
+	resp, err := c.encryptedRequest(webPath, map[string]any{
+		"module": moduleStatus,
+		"action": actionGet,
 		"token":  c.token,
 	})
 	if err != nil {
@@ -511,47 +488,39 @@ func (c *Client) GetStatus() (*Status, error) {
 }
 
 func parseStatus(s *Status, resp map[string]any) {
-	// Device info (nested under "deviceInfo")
 	if di, ok := resp["deviceInfo"].(map[string]any); ok {
-		s.Model = firstStr(di, "model")
-		s.Firmware = firstStr(di, "firmwareVer")
+		s.Model = jsonStr(di, "model")
+		s.Firmware = jsonStr(di, "firmwareVer")
 	}
 
-	// WAN info (nested under "wan")
 	if wan, ok := resp["wan"].(map[string]any); ok {
-		s.NetworkTypeRaw = firstInt(wan, "networkType")
-		s.NetworkType = networkTypeStr(s.NetworkTypeRaw)
-		s.Band = firstInt(wan, "band")
-		s.ConnectStatus = firstInt(wan, "connectStatus")
-		s.SignalStrength = firstInt(wan, "signalStrength")
-		s.RSRP = firstInt(wan, "rsrp")
-		s.RSRQ = firstInt(wan, "rsrq")
-		s.RSSI = firstInt(wan, "rssi")
-		s.SNR = firstInt(wan, "snr")
-		s.WanIP = firstStr(wan, "ipv4")
-		s.Operator = firstStr(wan, "operatorName")
-		s.TxSpeed = firstStr(wan, "txSpeed")
-		s.RxSpeed = firstStr(wan, "rxSpeed")
+		s.NetworkType = networkTypeStr(jsonInt(wan, "networkType"))
+		s.Band = jsonInt(wan, "band")
+		s.ConnectStatus = jsonInt(wan, "connectStatus")
+		s.SignalStrength = jsonInt(wan, "signalStrength")
+		s.RSRP = jsonInt(wan, "rsrp")
+		s.RSRQ = jsonInt(wan, "rsrq")
+		s.RSSI = jsonInt(wan, "rssi")
+		s.SNR = jsonInt(wan, "snr")
+		s.WanIP = jsonStr(wan, "ipv4")
+		s.Operator = jsonStr(wan, "operatorName")
+		s.TxSpeed = jsonStr(wan, "txSpeed")
+		s.RxSpeed = jsonStr(wan, "rxSpeed")
+		s.TotalBytes = jsonFloatStr(wan, "totalStatistics")
+		s.DailyBytes = jsonFloatStr(wan, "dailyStatistics")
 
-		// Data stats from status (bytes as float strings)
-		s.TotalBytes = parseFloatStr(wan, "totalStatistics")
-		s.DailyBytes = parseFloatStr(wan, "dailyStatistics")
-
-		// If signalStrength is 0 (M7010 bug), derive from RSRP
 		if s.SignalStrength == 0 && s.RSRP != 0 {
 			s.SignalStrength = rsrpToSignal(s.RSRP)
 		}
 	}
 
-	// Battery (nested under "battery")
 	if bat, ok := resp["battery"].(map[string]any); ok {
-		s.BatteryPercent = firstInt(bat, "voltage") // M7010 uses "voltage" for percentage
-		s.BatteryCharging = firstBool(bat, "charging")
+		s.BatteryPercent = jsonInt(bat, "voltage") // the "voltage" field actually holds a percent
+		s.BatteryCharging = jsonBool(bat, "charging")
 	}
 
-	// Connected devices
 	if cd, ok := resp["connectedDevices"].(map[string]any); ok {
-		s.ConnectedDevices = firstInt(cd, "number")
+		s.ConnectedDevices = jsonInt(cd, "number")
 	}
 }
 
@@ -560,9 +529,9 @@ func (c *Client) GetFlowStats(s *Status) error {
 		return fmt.Errorf("not logged in")
 	}
 
-	resp, err := c.encryptedRequest("/cgi-bin/web_cgi", map[string]any{
-		"module": "flowstat",
-		"action": 0,
+	resp, err := c.encryptedRequest(webPath, map[string]any{
+		"module": moduleFlowStat,
+		"action": actionGet,
 		"token":  c.token,
 	})
 	if err != nil {
@@ -572,84 +541,58 @@ func (c *Client) GetFlowStats(s *Status) error {
 	s.RawFlowStat = resp
 
 	if settings, ok := resp["settings"].(map[string]any); ok {
-		s.AdjustedBytes = parseFloatStr(settings, "adjustStatistics")
-		s.PaymentDay = firstInt(settings, "paymentDay")
+		s.AdjustedBytes = jsonFloatStr(settings, "adjustStatistics")
+		s.PaymentDay = jsonInt(settings, "paymentDay")
 
-		limitStr := firstStr(settings, "limitation")
+		limitStr := jsonStr(settings, "limitation")
 		if limitStr != "" && limitStr != "0.000000" {
-			fmt.Sscanf(limitStr, "%f", &s.MonthLimitBytes)
+			s.MonthLimitBytes, _ = strconv.ParseFloat(limitStr, 64)
 		}
 	}
 
 	return nil
 }
 
-// parseFloatStr extracts a float from a string value in the map (e.g. "14473800628.000000").
-func parseFloatStr(m map[string]any, key string) float64 {
-	if s := firstStr(m, key); s != "" {
-		var f float64
-		fmt.Sscanf(s, "%f", &f)
-		return f
-	}
-	return firstFloat(m, key)
-}
-
 // --- JSON helpers ---
 
-func firstStr(m map[string]any, keys ...string) string {
-	for _, k := range keys {
-		if v, ok := m[k]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				return s
-			}
-		}
-	}
-	return ""
+func jsonStr(m map[string]any, key string) string {
+	s, _ := m[key].(string)
+	return s
 }
 
-func firstInt(m map[string]any, keys ...string) int {
-	for _, k := range keys {
-		if v, ok := m[k]; ok {
-			switch n := v.(type) {
-			case float64:
-				if int(n) != 0 {
-					return int(n)
-				}
-			case int:
-				if n != 0 {
-					return n
-				}
-			}
-		}
+func jsonInt(m map[string]any, key string) int {
+	return intFrom(m[key])
+}
+
+func jsonBool(m map[string]any, key string) bool {
+	b, _ := m[key].(bool)
+	return b
+}
+
+// jsonFloatStr reads a value stored as a decimal string like
+// "14473800628.000000", falling back to a JSON number if present.
+func jsonFloatStr(m map[string]any, key string) float64 {
+	switch v := m[key].(type) {
+	case string:
+		f, _ := strconv.ParseFloat(v, 64)
+		return f
+	case float64:
+		return v
 	}
 	return 0
 }
 
-func firstFloat(m map[string]any, keys ...string) float64 {
-	for _, k := range keys {
-		if v, ok := m[k]; ok {
-			switch n := v.(type) {
-			case float64:
-				if n != 0 {
-					return n
-				}
-			case int:
-				if n != 0 {
-					return float64(n)
-				}
-			}
-		}
+// intFrom handles the two ways a JSON integer may arrive in a
+// map[string]any: as float64 (the default) or as a numeric string.
+func intFrom(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case string:
+		i, _ := strconv.Atoi(n)
+		return i
 	}
 	return 0
-}
-
-func firstBool(m map[string]any, keys ...string) bool {
-	for _, k := range keys {
-		if v, ok := m[k]; ok {
-			if b, ok := v.(bool); ok && b {
-				return true
-			}
-		}
-	}
-	return false
 }

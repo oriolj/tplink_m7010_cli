@@ -6,7 +6,7 @@ WAYBAR_DIR   := $(HOME)/.config/waybar
 GO           ?= go
 GOFLAGS      ?= -trimpath -ldflags="-s -w"
 
-.PHONY: all build run tui waybar raw clean install uninstall install-waybar fmt vet tidy
+.PHONY: all build run waybar raw clean install uninstall install-waybar fmt vet tidy
 
 all: build
 
@@ -15,9 +15,7 @@ build: $(BINARY)
 $(BINARY): main.go client.go go.mod go.sum
 	$(GO) build $(GOFLAGS) -o $@ .
 
-run: tui
-
-tui: build
+run: build
 	./$(BINARY)
 
 waybar: build

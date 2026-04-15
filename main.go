@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -34,7 +35,6 @@ var (
 func main() {
 	flag.Parse()
 
-	// Allow password from env var
 	if p := os.Getenv("TPLINK_PASS"); p != "" {
 		*flagPass = p
 	}
@@ -42,17 +42,14 @@ func main() {
 		*flagAddr = a
 	}
 
-	if *flagWaybar {
+	switch {
+	case *flagWaybar:
 		runWaybar()
-		return
-	}
-
-	if *flagRaw {
+	case *flagRaw:
 		runRaw()
-		return
+	default:
+		runTUI()
 	}
-
-	runTUI()
 }
 
 // --- Waybar mode ---
@@ -65,7 +62,8 @@ type WaybarOutput struct {
 }
 
 func runWaybar() {
-	status, err := fetchStatus()
+	// One-shot; skip Logout to save a round-trip — the modem expires tokens itself.
+	status, err := fetchStatusOneShot(false)
 	if err != nil {
 		out := WaybarOutput{
 			Text:    " --",
@@ -120,19 +118,18 @@ func runWaybar() {
 		class = "disconnected"
 	}
 
-	out := WaybarOutput{
+	json.NewEncoder(os.Stdout).Encode(WaybarOutput{
 		Text:    text,
 		Tooltip: tooltip.String(),
 		Class:   class,
 		Alt:     status.NetworkType,
-	}
-	json.NewEncoder(os.Stdout).Encode(out)
+	})
 }
 
 // --- Raw dump mode ---
 
 func runRaw() {
-	status, err := fetchStatus()
+	status, err := fetchStatusOneShot(true)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -145,35 +142,65 @@ func runRaw() {
 	enc.Encode(status.RawFlowStat)
 }
 
-// --- Shared fetch logic ---
-
-func fetchStatus() (*Status, error) {
+// fetchStatusOneShot logs in, reads, and optionally logs out. Logout is
+// skipped in waybar mode (one-shot, fire-and-forget) to save a round-trip.
+func fetchStatusOneShot(doLogout bool) (*Status, error) {
 	c := NewClient(*flagAddr, *flagDebug)
 	if err := c.Login(*flagPass); err != nil {
 		return nil, fmt.Errorf("login: %w", err)
 	}
-	defer c.Logout()
+	if doLogout {
+		defer c.Logout()
+	}
+	return fetchInto(c)
+}
 
+func fetchInto(c *Client) (*Status, error) {
 	status, err := c.GetStatus()
 	if err != nil {
 		return nil, fmt.Errorf("status: %w", err)
 	}
-
 	if err := c.GetFlowStats(status); err != nil {
 		return nil, fmt.Errorf("flowstat: %w", err)
 	}
-
 	return status, nil
 }
 
 // --- TUI mode ---
+//
+// The TUI keeps a single logged-in Client across ticks instead of
+// re-authenticating every refresh. On any error the client is dropped and
+// the next tick re-logs in.
+
+var (
+	tuiClient   *Client
+	tuiClientMu sync.Mutex
+)
+
+func tuiFetch() (*Status, error) {
+	tuiClientMu.Lock()
+	defer tuiClientMu.Unlock()
+
+	if tuiClient == nil {
+		c := NewClient(*flagAddr, *flagDebug)
+		if err := c.Login(*flagPass); err != nil {
+			return nil, fmt.Errorf("login: %w", err)
+		}
+		tuiClient = c
+	}
+
+	status, err := fetchInto(tuiClient)
+	if err != nil {
+		tuiClient = nil
+		return nil, err
+	}
+	return status, nil
+}
 
 type model struct {
 	status  *Status
 	err     error
 	loading bool
-	width   int
-	height  int
 	refresh time.Duration
 }
 
@@ -193,7 +220,7 @@ func (m model) Init() tea.Cmd {
 }
 
 func fetchCmd() tea.Msg {
-	s, err := fetchStatus()
+	s, err := tuiFetch()
 	return statusMsg{status: s, err: err}
 }
 
@@ -213,9 +240,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loading = true
 			return m, fetchCmd
 		}
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
 	case statusMsg:
 		m.loading = false
 		m.status = msg.status
@@ -227,43 +251,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+var (
+	titleStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#00d4aa")).
+			MarginBottom(1)
+
+	boxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#555")).
+			Padding(1, 2).
+			Width(46)
+
+	labelStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#888")).
+			Width(14)
+
+	valueStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#fff"))
+
+	goodStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00d4aa"))
+	warnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffaa00"))
+	critStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff4444"))
+	dimStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#555"))
+)
+
+func writeRow(b *strings.Builder, label string, valStyle lipgloss.Style, value string) {
+	b.WriteString(labelStyle.Render(label))
+	b.WriteString(valStyle.Render(value))
+	b.WriteByte('\n')
+}
+
 func (m model) View() string {
-	// Styles
-	titleStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("#00d4aa")).
-		MarginBottom(1)
-
-	boxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#555")).
-		Padding(1, 2).
-		Width(46)
-
-	labelStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#888")).
-		Width(14)
-
-	valueStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("#fff"))
-
-	goodStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#00d4aa"))
-
-	warnStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#ffaa00"))
-
-	critStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#ff4444"))
-
-	dimStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#555"))
-
 	var content strings.Builder
-
 	content.WriteString(titleStyle.Render("TP-Link M7010"))
-	content.WriteString("\n")
+	content.WriteByte('\n')
 
 	if m.err != nil {
 		content.WriteString(critStyle.Render("Error: " + m.err.Error()))
@@ -279,45 +302,40 @@ func (m model) View() string {
 
 	s := m.status
 
-	// Connection type
 	netStr := s.NetworkType
 	if netStr == "" {
 		netStr = "Unknown"
 	}
 	netStyle := goodStyle
-	if netStr == "No Service" || netStr == "" {
+	if netStr == "No Service" || netStr == "Unknown" {
 		netStyle = critStyle
 	}
-	row := labelStyle.Render("Connection") + netStyle.Render(netStr)
-	content.WriteString(row + "\n")
+	writeRow(&content, "Connection", netStyle, netStr)
 
-	// Signal
 	bars := signalBars(s.SignalStrength)
 	sigStyle := goodStyle
-	if s.SignalStrength <= 1 {
+	switch {
+	case s.SignalStrength <= 1:
 		sigStyle = critStyle
-	} else if s.SignalStrength <= 2 {
+	case s.SignalStrength <= 2:
 		sigStyle = warnStyle
 	}
-	row = labelStyle.Render("Signal") + sigStyle.Render(fmt.Sprintf("%s  %d/5", bars, s.SignalStrength))
-	content.WriteString(row + "\n")
+	writeRow(&content, "Signal", sigStyle, fmt.Sprintf("%s  %d/5", bars, s.SignalStrength))
 
-	// Battery
 	batBar := batteryBar(s.BatteryPercent)
 	batStyle := goodStyle
-	if s.BatteryPercent < 20 {
+	switch {
+	case s.BatteryPercent < 20:
 		batStyle = critStyle
-	} else if s.BatteryPercent < 40 {
+	case s.BatteryPercent < 40:
 		batStyle = warnStyle
 	}
 	charging := ""
 	if s.BatteryCharging {
 		charging = " [charging]"
 	}
-	row = labelStyle.Render("Battery") + batStyle.Render(fmt.Sprintf("%s %d%%%s", batBar, s.BatteryPercent, charging))
-	content.WriteString(row + "\n")
+	writeRow(&content, "Battery", batStyle, fmt.Sprintf("%s %d%%%s", batBar, s.BatteryPercent, charging))
 
-	// Data usage
 	dataGB := bytesToGB(s.TotalBytes)
 	limitGB := bytesToGB(s.MonthLimitBytes)
 	dataStr := fmt.Sprintf("%.2f GB", dataGB)
@@ -325,44 +343,37 @@ func (m model) View() string {
 	if limitGB > 0 {
 		pct := (dataGB / limitGB) * 100
 		dataStr = fmt.Sprintf("%.2f / %.0f GB (%.0f%%)", dataGB, limitGB, pct)
-		if pct > 90 {
+		switch {
+		case pct > 90:
 			dataStyle = critStyle
-		} else if pct > 70 {
+		case pct > 70:
 			dataStyle = warnStyle
 		}
 	}
-	row = labelStyle.Render("Data Used") + dataStyle.Render(dataStr)
-	content.WriteString(row + "\n")
+	writeRow(&content, "Data Used", dataStyle, dataStr)
 
-	// Operator / Band
 	if s.Operator != "" {
 		opStr := s.Operator
 		if s.Band > 0 {
 			opStr += fmt.Sprintf("  B%d", s.Band)
 		}
-		row = labelStyle.Render("Operator") + valueStyle.Render(opStr)
-		content.WriteString(row + "\n")
+		writeRow(&content, "Operator", valueStyle, opStr)
 	}
 
-	// WAN IP
 	if s.WanIP != "" {
-		row = labelStyle.Render("WAN IP") + valueStyle.Render(s.WanIP)
-		content.WriteString(row + "\n")
+		writeRow(&content, "WAN IP", valueStyle, s.WanIP)
 	}
 
-	// Connected devices
 	if s.ConnectedDevices > 0 {
-		row = labelStyle.Render("Devices") + valueStyle.Render(fmt.Sprintf("%d", s.ConnectedDevices))
-		content.WriteString(row + "\n")
+		writeRow(&content, "Devices", valueStyle, fmt.Sprintf("%d", s.ConnectedDevices))
 	}
 
-	// Footer
-	content.WriteString("\n")
-	loadingStr := ""
+	content.WriteByte('\n')
+	footer := "r = refresh  q = quit"
 	if m.loading {
-		loadingStr = " refreshing..."
+		footer += " refreshing..."
 	}
-	content.WriteString(dimStyle.Render(fmt.Sprintf("r = refresh  q = quit%s", loadingStr)))
+	content.WriteString(dimStyle.Render(footer))
 
 	return boxStyle.Render(content.String())
 }
@@ -375,7 +386,7 @@ func runTUI() {
 	}
 }
 
-// --- Helpers ---
+// --- Display helpers ---
 
 func bytesToGB(b float64) float64 {
 	return b / (1024 * 1024 * 1024)
@@ -397,7 +408,7 @@ func signalBars(strength int) string {
 func batteryBar(pct int) string {
 	filled := pct / 10
 	var b strings.Builder
-	b.WriteString("[")
+	b.WriteByte('[')
 	for i := 0; i < 10; i++ {
 		if i < filled {
 			b.WriteString("█")
@@ -405,6 +416,6 @@ func batteryBar(pct int) string {
 			b.WriteString("░")
 		}
 	}
-	b.WriteString("]")
+	b.WriteByte(']')
 	return b.String()
 }
