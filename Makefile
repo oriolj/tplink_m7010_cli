@@ -48,10 +48,11 @@ install: build
 uninstall:
 	rm -f $(BINDIR)/$(BINARY)
 
-# Drops the waybar wrapper script only. The caller must still edit
+# Drops the waybar wrapper scripts. The caller must still edit
 # config.jsonc + style.css — see WAYBAR.md.
 install-waybar:
 	install -d $(WAYBAR_DIR)/scripts
 	install -m755 contrib/mifi.sh $(WAYBAR_DIR)/scripts/mifi.sh
-	@echo "Installed wrapper to $(WAYBAR_DIR)/scripts/mifi.sh"
+	install -m755 contrib/mifi-tui.sh $(WAYBAR_DIR)/scripts/mifi-tui.sh
+	@echo "Installed wrappers to $(WAYBAR_DIR)/scripts/"
 	@echo "Reload waybar with: pkill -SIGUSR2 waybar"

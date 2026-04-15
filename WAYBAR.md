@@ -7,6 +7,7 @@
 | `~/.local/bin/tplink-m7010`              | Compiled binary                             | 755   |
 | `~/.config/tplink-m7010/password`        | Plain password, one line, no trailing space | 600   |
 | `~/.config/waybar/scripts/mifi.sh`       | Wrapper used by the module                  | 755   |
+| `~/.config/waybar/scripts/mifi-tui.sh`   | on-click handler — opens TUI in `$TPLINK_TERM` (default `ghostty`) | 755 |
 
 The wrapper script is the important piece — it short-circuits with no output
 when the modem isn't on the LAN (TCP connect check with 500ms timeout), which
@@ -28,7 +29,8 @@ the bar.
       "return-type": "json",
       "interval": 30,
       "format": "{}",
-      "tooltip": true
+      "tooltip": true,
+      "on-click": "~/.config/waybar/scripts/mifi-tui.sh"
   }
   ```
 
