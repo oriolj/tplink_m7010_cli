@@ -1,5 +1,21 @@
 package main
 
+// M7010 web API client.
+//
+// Transport is a two-step envelope:
+//
+//  1. POST /cgi-bin/auth_cgi with {"data": base64(json)} — returns nonce,
+//     RSA pubkey/modulus (hex) and seqNum (base64-wrapped JSON).
+//  2. For login + every later call, send {"data": aes_b64, "sign": rsa_hex}
+//     where the sign string is a manually-ordered "key=…&iv=…&h=…&s=…"
+//     blob (alphabetical ordering breaks the server). Responses are the
+//     base64 of AES-CBC ciphertext, decrypt with the same key/iv we
+//     generated client-side.
+//
+// Gotchas: Go's stdlib RSA refuses the 512-bit modulus the M7010 uses, so
+// we implement PKCS1v15 (with chunking) against math/big ourselves. See
+// PROTOCOL.md for the full picture.
+
 import (
 	"bytes"
 	"crypto/aes"

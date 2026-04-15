@@ -56,8 +56,21 @@ See `PROTOCOL.md` for everything reverse-engineered about the M7010 web API
 M7010 uses a different wire format than the M7350 (plain JSON + nonce digest)
 that most existing reverse-engineering efforts target.
 
+## Documentation
+
+| File              | Covers                                                                 |
+| ----------------- | ---------------------------------------------------------------------- |
+| `README.md`       | This file — what it is, how to run it                                  |
+| `PROTOCOL.md`     | Reverse-engineered wire format, module/action catalog, example bodies  |
+| `ARCHITECTURE.md` | Code structure, request flow, `Client` state, TUI model                |
+| `WAYBAR.md`       | Waybar setup on this specific machine (paths, wrapper script behavior) |
+| `DEVELOPMENT.md`  | Build log: what was tried, what failed, what stuck                     |
+| `CLAUDE.md`       | Pointers for future Claude Code sessions                               |
+
 ## Files
 
 - `main.go` — CLI entry point, flag parsing, waybar/raw/TUI modes, TUI model
 - `client.go` — HTTP client, AES-128-CBC + RSA-PKCS1v15 envelope, status/flowstat parsing
+- `Makefile` — build, install, waybar integration
 - `waybar-example.jsonc` — Minimal waybar module snippet for other machines
+- `contrib/mifi.sh` — Waybar wrapper: silent when modem is unreachable

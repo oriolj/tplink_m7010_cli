@@ -1,3 +1,13 @@
+// Command tplink-m7010 reads connection, signal, battery and data-usage state
+// from a TP-Link M7010 mobile Wi-Fi hotspot. Three modes:
+//
+//   - default: interactive Bubble Tea TUI dashboard
+//   - --waybar: single JSON line for use as a waybar custom module
+//   - --raw:    decrypted raw API responses, for debugging / exploration
+//
+// Configuration is by flag or by TPLINK_ADDR / TPLINK_PASS env vars.
+// See PROTOCOL.md for wire-format details and CLAUDE.md for guidance on
+// modifying the crypto.
 package main
 
 import (
