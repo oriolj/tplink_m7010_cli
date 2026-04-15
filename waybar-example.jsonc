@@ -1,0 +1,19 @@
+// Add this to your waybar config (typically ~/.config/waybar/config)
+// in the "modules-right" (or wherever you want it) array:
+//   "custom/mifi"
+//
+// Then add this module definition:
+{
+    "custom/mifi": {
+        "exec": "tplink-m7010 --waybar",
+        "return-type": "json",
+        "interval": 30,
+        "format": "{}",
+        "tooltip": true,
+        // Optional: style classes in style.css
+        // #custom-mifi.good { color: #00d4aa; }
+        // #custom-mifi.warning { color: #ffaa00; }
+        // #custom-mifi.critical { color: #ff4444; }
+        // #custom-mifi.disconnected { color: #666; }
+    }
+}
