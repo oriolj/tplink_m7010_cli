@@ -229,6 +229,11 @@ type model struct {
 	err     error
 	loading bool
 	refresh time.Duration
+
+	// pendingAction is set to "poweroff" or "reboot" after first keypress,
+	// cleared when confirmed (second press) or cancelled (any other key).
+	pendingAction string
+	actionResult  string
 }
 
 type statusMsg struct {
@@ -237,6 +242,11 @@ type statusMsg struct {
 }
 
 type tickMsg time.Time
+
+type actionMsg struct {
+	action string
+	err    error
+}
 
 func initialModel(refresh time.Duration) model {
 	return model{loading: true, refresh: refresh}
@@ -260,22 +270,76 @@ func tickCmd(d time.Duration) tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
+		key := msg.String()
+
+		// Second press on the same action key confirms and fires it.
+		if m.pendingAction != "" {
+			switch {
+			case m.pendingAction == "poweroff" && key == "p",
+				m.pendingAction == "reboot" && key == "R":
+				action := m.pendingAction
+				m.pendingAction = ""
+				m.actionResult = action + "…"
+				return m, actionCmd(action)
+			default:
+				m.pendingAction = ""
+				return m, nil
+			}
+		}
+
+		switch key {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
 		case "r":
 			m.loading = true
 			return m, fetchCmd
+		case "p":
+			m.pendingAction = "poweroff"
+		case "R":
+			m.pendingAction = "reboot"
 		}
 	case statusMsg:
 		m.loading = false
 		m.status = msg.status
 		m.err = msg.err
+		m.actionResult = "" // fresh data — drop stale "reboot sent" notice
 	case tickMsg:
 		m.loading = true
 		return m, tea.Batch(fetchCmd, tickCmd(m.refresh))
+	case actionMsg:
+		if msg.err != nil {
+			m.actionResult = msg.action + " failed: " + msg.err.Error()
+		} else {
+			m.actionResult = msg.action + " sent"
+		}
 	}
 	return m, nil
+}
+
+func actionCmd(action string) tea.Cmd {
+	return func() tea.Msg {
+		tuiClientMu.Lock()
+		defer tuiClientMu.Unlock()
+
+		if tuiClient == nil {
+			c := NewClient(*flagAddr, *flagDebug)
+			if err := c.Login(*flagPass); err != nil {
+				return actionMsg{action: action, err: err}
+			}
+			tuiClient = c
+		}
+
+		var err error
+		switch action {
+		case "poweroff":
+			err = tuiClient.Shutdown()
+		case "reboot":
+			err = tuiClient.Reboot()
+		}
+		// The modem drops the connection after either, so the client is stale.
+		tuiClient = nil
+		return actionMsg{action: action, err: err}
+	}
 }
 
 var (
@@ -396,11 +460,20 @@ func (m model) View() string {
 	}
 
 	content.WriteByte('\n')
-	footer := "r = refresh  q = quit"
-	if m.loading {
-		footer += " refreshing..."
+	switch {
+	case m.pendingAction == "poweroff":
+		content.WriteString(warnStyle.Render("Press p again to POWER OFF, any other key to cancel"))
+	case m.pendingAction == "reboot":
+		content.WriteString(warnStyle.Render("Press R again to REBOOT, any other key to cancel"))
+	case m.actionResult != "":
+		content.WriteString(goodStyle.Render(m.actionResult))
+	default:
+		footer := "r refresh  p poweroff  R reboot  q quit"
+		if m.loading {
+			footer += "  (refreshing…)"
+		}
+		content.WriteString(dimStyle.Render(footer))
 	}
-	content.WriteString(dimStyle.Render(footer))
 
 	return boxStyle.Render(content.String())
 }
