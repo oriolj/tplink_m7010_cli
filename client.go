@@ -45,11 +45,14 @@ const (
 	moduleAuth     = "authenticator"
 	moduleStatus   = "status"
 	moduleFlowStat = "flowstat"
+	moduleReboot   = "reboot"
 
-	actionLoad   = 0
-	actionGet    = 0
-	actionLogin  = 1
-	actionLogout = 3
+	actionLoad     = 0
+	actionGet      = 0
+	actionLogin    = 1
+	actionLogout   = 3
+	actionReboot   = 0
+	actionShutdown = 1
 )
 
 type Client struct {
@@ -232,6 +235,36 @@ func (c *Client) Login(password string) error {
 	}
 
 	c.token = token
+	return nil
+}
+
+// Shutdown powers the modem off. Requires an active session.
+func (c *Client) Shutdown() error {
+	return c.rebootAction(actionShutdown)
+}
+
+// Reboot restarts the modem. Requires an active session.
+func (c *Client) Reboot() error {
+	return c.rebootAction(actionReboot)
+}
+
+func (c *Client) rebootAction(action int) error {
+	if c.token == "" {
+		return fmt.Errorf("not logged in")
+	}
+	// The modem often kills the connection before responding; an empty or
+	// transport-level error is the normal outcome for shutdown.
+	resp, err := c.encryptedRequest(webPath, map[string]any{
+		"module": moduleReboot,
+		"action": action,
+		"token":  c.token,
+	})
+	if err != nil {
+		return nil
+	}
+	if code, ok := resp["result"].(float64); ok && code != 0 {
+		return fmt.Errorf("reboot/shutdown failed (code %.0f)", code)
+	}
 	return nil
 }
 

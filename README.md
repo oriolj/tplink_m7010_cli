@@ -18,6 +18,8 @@ either as a Bubble Tea TUI dashboard or as a waybar JSON module.
 | TUI        | (default)         | Interactive dashboard, polls every 10s       |
 | Waybar     | `--waybar`        | Single JSON line: `{text, tooltip, class}`   |
 | Raw dump   | `--raw`           | Pretty-printed raw `status` + `flowstat` JSON |
+| Power off  | `--poweroff`      | Shut the modem down (it will need physical button press to wake) |
+| Reboot     | `--reboot`        | Restart the modem                             |
 | Debug      | `--debug`         | Dumps every HTTP request/response, plaintext and encrypted |
 
 ## Flags

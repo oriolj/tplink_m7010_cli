@@ -24,12 +24,14 @@ import (
 )
 
 var (
-	flagAddr    = flag.String("addr", "192.168.0.1", "modem IP address")
-	flagPass    = flag.String("pass", "admin", "admin password")
-	flagWaybar  = flag.Bool("waybar", false, "output waybar JSON and exit")
-	flagRaw     = flag.Bool("raw", false, "dump raw API responses and exit")
-	flagDebug   = flag.Bool("debug", false, "print debug HTTP traffic")
-	flagRefresh = flag.Duration("refresh", 10*time.Second, "TUI refresh interval")
+	flagAddr     = flag.String("addr", "192.168.0.1", "modem IP address")
+	flagPass     = flag.String("pass", "admin", "admin password")
+	flagWaybar   = flag.Bool("waybar", false, "output waybar JSON and exit")
+	flagRaw      = flag.Bool("raw", false, "dump raw API responses and exit")
+	flagDebug    = flag.Bool("debug", false, "print debug HTTP traffic")
+	flagPoweroff = flag.Bool("poweroff", false, "power the modem off and exit")
+	flagReboot   = flag.Bool("reboot", false, "reboot the modem and exit")
+	flagRefresh  = flag.Duration("refresh", 10*time.Second, "TUI refresh interval")
 )
 
 func main() {
@@ -43,6 +45,10 @@ func main() {
 	}
 
 	switch {
+	case *flagPoweroff:
+		runPower("shutdown")
+	case *flagReboot:
+		runPower("reboot")
 	case *flagWaybar:
 		runWaybar()
 	case *flagRaw:
@@ -50,6 +56,27 @@ func main() {
 	default:
 		runTUI()
 	}
+}
+
+func runPower(action string) {
+	c := NewClient(*flagAddr, *flagDebug)
+	if err := c.Login(*flagPass); err != nil {
+		fmt.Fprintf(os.Stderr, "login: %v\n", err)
+		os.Exit(1)
+	}
+
+	var err error
+	switch action {
+	case "shutdown":
+		err = c.Shutdown()
+	case "reboot":
+		err = c.Reboot()
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", action, err)
+		os.Exit(1)
+	}
+	fmt.Printf("%s command sent\n", action)
 }
 
 // --- Waybar mode ---
