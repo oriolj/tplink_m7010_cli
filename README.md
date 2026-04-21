@@ -29,9 +29,20 @@ either as a Bubble Tea TUI dashboard or as a waybar JSON module.
 --pass      admin password (default "admin")
 --waybar    waybar JSON mode
 --raw       dump decrypted API responses
+--poweroff  power the modem off and exit
+--reboot    reboot the modem and exit
 --debug     verbose HTTP/crypto logging
 --refresh   TUI refresh interval (default 10s)
 ```
+
+## TUI keybinds
+
+| Key           | Action                                                        |
+| ------------- | ------------------------------------------------------------- |
+| `r`           | Refresh now                                                   |
+| `p`, then `p` | Power off the modem (first press arms, second confirms)       |
+| `R`, then `R` | Reboot the modem (first press arms, second confirms)          |
+| `q` / `esc`   | Quit                                                          |
 
 Environment variables `TPLINK_ADDR` and `TPLINK_PASS` override the flags; prefer
 these in shell config to keep the password out of `ps`.
@@ -76,3 +87,4 @@ that most existing reverse-engineering efforts target.
 - `Makefile` — build, install, waybar integration
 - `waybar-example.jsonc` — Minimal waybar module snippet for other machines
 - `contrib/mifi.sh` — Waybar wrapper: silent when modem is unreachable
+- `contrib/mifi-tui.sh` — Opens the TUI in a terminal (wired to waybar tile click)
