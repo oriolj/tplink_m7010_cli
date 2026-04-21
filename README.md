@@ -44,8 +44,32 @@ either as a Bubble Tea TUI dashboard or as a waybar JSON module.
 | `R`, then `R` | Reboot the modem (first press arms, second confirms)          |
 | `q` / `esc`   | Quit                                                          |
 
-Environment variables `TPLINK_ADDR` and `TPLINK_PASS` override the flags; prefer
-these in shell config to keep the password out of `ps`.
+## Password
+
+Three ways to supply the admin password, in order of preference:
+
+1. **Password file** (what the bundled waybar wrapper uses):
+
+   ```sh
+   install -d -m700 ~/.config/tplink-m7010
+   printf '%s' 'your-password' > ~/.config/tplink-m7010/password
+   chmod 600 ~/.config/tplink-m7010/password
+   ```
+
+   Then read it into the env var when running by hand:
+
+   ```sh
+   TPLINK_PASS=$(<~/.config/tplink-m7010/password) tplink-m7010
+   ```
+
+   `make install` creates the directory and prints this hint if the file is
+   missing.
+
+2. **Environment variable** — set `TPLINK_PASS` (and optionally `TPLINK_ADDR`)
+   in your shell config. Both override the corresponding flags.
+
+3. **`--pass` flag** — fine for one-off debugging, but visible in `ps` output
+   on a shared machine.
 
 ## Installation
 

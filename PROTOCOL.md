@@ -115,8 +115,8 @@ h=<md5('admin'+password)>&s=<seqNum + len(base64(aes_ciphertext))>
 
 Reverse-engineered from `tp_m7350_enums.h` in `vpaeder/tplink_m7350_cpp`.
 Numbers below are the `action` values inside each module. Not exhaustive — we
-only use `status`/`flowstat`/`authenticator`, the rest are untested on the
-M7010 but likely share the convention.
+only use `status`/`flowstat`/`authenticator`/`reboot`, the rest are untested
+on the M7010 but likely share the convention.
 
 | Module        | String              | Key actions                                                                   |
 | ------------- | ------------------- | ----------------------------------------------------------------------------- |
