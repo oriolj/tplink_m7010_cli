@@ -33,14 +33,15 @@ const (
 	mudiDefaultAddr = "192.168.8.1"
 	mudiUsername    = "root" // GL.iNet UI logs in as root
 	mudiRPCPath     = "/rpc"
-	mudiWSPath      = "/ws?sid=" // sid is appended
 
 	// mudiWSCollectTimeout bounds how long Fetch waits for the cellular
-	// signal/SIM/traffic stream. Server pushes events every ~10s; we
-	// usually see the first batch within ~50ms of connecting because nginx
-	// is pre-warmed. 2s is a safe cap before we give up and ship whatever
-	// we got.
+	// signal/SIM/traffic stream. Server pushes events every ~10s; the
+	// first burst arrives within ~50ms of subscribing. 2s is a safe cap.
 	mudiWSCollectTimeout = 2 * time.Second
+
+	evSimsStatus     = "cellular.sims_status"
+	evNetworksInfo   = "cellular.networks_info"
+	evNetworksStatus = "cellular.networks_status"
 )
 
 type MudiClient struct {
@@ -62,6 +63,8 @@ func NewMudiClient(addr string, debug bool) Device {
 }
 
 func (m *MudiClient) Name() string { return "GL.iNet Mudi (GL-E5800)" }
+
+var _ Device = (*MudiClient)(nil)
 
 func (m *MudiClient) debugf(format string, args ...any) {
 	if m.debug {
@@ -207,7 +210,7 @@ func (m *MudiClient) Fetch() (*Status, error) {
 	}()
 	go func() {
 		defer wg.Done()
-		cellular, wsErr = m.collectCellular(mudiWSCollectTimeout)
+		cellular, wsErr = m.collectCellular()
 	}()
 	wg.Wait()
 
@@ -232,58 +235,44 @@ func (m *MudiClient) Fetch() (*Status, error) {
 	return s, nil
 }
 
-// cellularSnapshot is whatever we managed to collect from the WebSocket
-// before the timeout fired. Any field can be empty/nil.
+// cellularSnapshot holds whatever we collected from the WS before the
+// deadline. Any field can be nil. Only the three populated here are
+// consumed downstream; sims_info / modems_* topics carry useful data
+// (iccid, IMEI, supported bands) but the widget doesn't surface them,
+// so we don't subscribe to them — see PROTOCOL_GLINET.md.
 type cellularSnapshot struct {
-	simsStatus     []map[string]any // cellular.sims_status
-	networksInfo   []map[string]any // cellular.networks_info
-	networksStatus []map[string]any // cellular.networks_status
-	simsInfo       []map[string]any // cellular.sims_info
-	raw            map[string]any   // everything we saw, for --raw mode
-}
-
-// mudiSubscribeEvents lists the WS event names we ask the server to push.
-// Server is silent until we subscribe — see PROTOCOL_GLINET.md for the
-// owsd-style {"cmd":"subscribe","name":…} protocol. The first burst
-// arrives within ~20ms of subscribing; subsequent updates every ~10s.
-var mudiSubscribeEvents = []string{
-	"cellular.modems_info",     // Quectel hardware: model, IMEIs, supported bands
-	"cellular.modems_status",   // modem-level state
-	"cellular.sims_info",       // SIM identity per slot (iccid, imsi, apn_list)
-	"cellular.sims_status",     // SIM op state per slot (carrier, strength 0-4, technology)
-	"cellular.networks_info",   // cell_info{mode, band, rsrp, rsrq, sinr, dl_bandwidth}, ipv4
-	"cellular.networks_status", // traffic_total, dial_status per slot
+	simsStatus     []map[string]any
+	networksInfo   []map[string]any
+	networksStatus []map[string]any
+	raw            map[string]any
 }
 
 // collectCellular opens the Mudi's event stream, subscribes to the
-// cellular topics, and reads until we have a complete picture (or the
-// timeout fires).
-func (m *MudiClient) collectCellular(timeout time.Duration) (cellularSnapshot, error) {
+// cellular topics we need, and reads until we have a complete picture
+// (or mudiWSCollectTimeout elapses). The deadline is set once on the
+// connection and covers dial + handshake + subscribe + read.
+func (m *MudiClient) collectCellular() (cellularSnapshot, error) {
 	var snap cellularSnapshot
 	if m.sid == "" {
 		return snap, fmt.Errorf("not logged in")
 	}
-	ws, err := dialWS(m.addr, mudiWSPath+m.sid, "Admin-Token="+m.sid, timeout)
+	deadline := time.Now().Add(mudiWSCollectTimeout)
+	ws, err := dialWS(m.addr, "/ws?sid="+m.sid, "Admin-Token="+m.sid, deadline)
 	if err != nil {
 		return snap, err
 	}
 	defer ws.close()
 
-	deadline := time.Now().Add(timeout)
-	ws.c.SetWriteDeadline(deadline)
-	ws.c.SetReadDeadline(deadline)
-
-	for _, name := range mudiSubscribeEvents {
+	for _, name := range [...]string{evSimsStatus, evNetworksInfo, evNetworksStatus} {
 		if err := ws.sendText(fmt.Sprintf(`{"cmd":"subscribe","name":%q}`, name)); err != nil {
 			return snap, fmt.Errorf("ws subscribe %s: %w", name, err)
 		}
 	}
 
 	snap.raw = map[string]any{}
-	for {
+	for snap.simsStatus == nil || snap.networksInfo == nil || snap.networksStatus == nil {
 		msg, err := ws.readMessage()
 		if err != nil {
-			// EOF or read timeout — return what we have.
 			break
 		}
 		var ev struct {
@@ -296,17 +285,12 @@ func (m *MudiClient) collectCellular(timeout time.Duration) (cellularSnapshot, e
 		m.debugf("ws %s\n", ev.Name)
 		snap.raw[ev.Name] = ev.Data
 		switch ev.Name {
-		case "cellular.sims_status":
+		case evSimsStatus:
 			snap.simsStatus = mapList(ev.Data["sims"])
-		case "cellular.sims_info":
-			snap.simsInfo = mapList(ev.Data["sims"])
-		case "cellular.networks_info":
+		case evNetworksInfo:
 			snap.networksInfo = mapList(ev.Data["networks"])
-		case "cellular.networks_status":
+		case evNetworksStatus:
 			snap.networksStatus = mapList(ev.Data["networks"])
-		}
-		if snap.simsStatus != nil && snap.networksInfo != nil && snap.networksStatus != nil {
-			break // got a full picture; stop early
 		}
 	}
 	return snap, nil
@@ -364,6 +348,7 @@ func applyCellular(s *Status, c cellularSnapshot) {
 	if activeSlot == "" {
 		return
 	}
+
 	if ss := findBySlot(c.simsStatus, activeSlot); ss != nil {
 		// strength is 0-4; map to our 0-5 scale by adding 1 when present.
 		if v := jsonInt(ss, "strength"); v > 0 {
@@ -373,24 +358,21 @@ func applyCellular(s *Status, c cellularSnapshot) {
 			s.Operator = op
 		}
 	}
+
 	if ni := findBySlot(c.networksInfo, activeSlot); ni != nil {
-		if ipv4, ok := ni["ipv4"].(map[string]any); ok {
-			if ip := jsonStr(ipv4, "ip"); ip != "" {
-				s.WanIP = ip
-			}
+		if ip := jsonStr(subMap(ni, "ipv4"), "ip"); ip != "" {
+			s.WanIP = ip
 		}
-		if cell, ok := ni["cell_info"].(map[string]any); ok {
+		if cell := subMap(ni, "cell_info"); cell != nil {
 			if mode := jsonStr(cell, "mode"); mode != "" {
 				s.NetworkType = friendlyNetworkType(mode)
 			}
 			s.Band = jsonInt(cell, "band")
-			// rsrp/rsrq/sinr come as decimal strings — reuse jsonFloatStr,
-			// then truncate to int for the existing dBm display.
+			// rsrp/rsrq/sinr arrive as decimal strings — jsonInt would
+			// reject the sign and the decimal point.
 			s.RSRP = int(jsonFloatStr(cell, "rsrp"))
 			s.RSRQ = int(jsonFloatStr(cell, "rsrq"))
 			s.SNR = int(jsonFloatStr(cell, "sinr"))
-			// rsrp_level (0-4) is the same scale as sims_status.strength.
-			// If sims_status didn't fire yet, fall back to it.
 			if s.SignalStrength == 0 {
 				if lvl := jsonInt(cell, "rsrp_level"); lvl > 0 {
 					s.SignalStrength = lvl + 1
@@ -398,6 +380,7 @@ func applyCellular(s *Status, c cellularSnapshot) {
 			}
 		}
 	}
+
 	if ns := findBySlot(c.networksStatus, activeSlot); ns != nil {
 		s.TotalBytes = jsonFloatStr(ns, "traffic_total")
 	}
@@ -407,17 +390,24 @@ func applyCellular(s *Status, c cellularSnapshot) {
 }
 
 // pickActiveSlot returns the slot ("1" / "2") whose dial succeeded
-// (dial_status == 0). Falls back to the first slot with any data.
+// (dial_status == 0). Falls back to any slot with data so the widget
+// still shows something during dial-in or after dial failure.
 func pickActiveSlot(c cellularSnapshot) string {
+	var fallback string
 	for _, n := range c.networksStatus {
-		if jsonInt(n, "dial_status") == 0 && jsonStr(n, "slot") != "" {
-			return jsonStr(n, "slot")
+		slot := jsonStr(n, "slot")
+		if slot == "" {
+			continue
 		}
-	}
-	for _, n := range c.networksStatus {
-		if slot := jsonStr(n, "slot"); slot != "" {
+		if jsonInt(n, "dial_status") == 0 {
 			return slot
 		}
+		if fallback == "" {
+			fallback = slot
+		}
+	}
+	if fallback != "" {
+		return fallback
 	}
 	for _, s := range c.simsStatus {
 		if slot := jsonStr(s, "slot"); slot != "" {
@@ -434,6 +424,14 @@ func findBySlot(list []map[string]any, slot string) map[string]any {
 		}
 	}
 	return nil
+}
+
+// subMap returns m[key] as a nested object, or nil if it isn't one.
+// jsonStr / jsonInt are nil-safe so callers can pipeline subMap through
+// them without an extra ok-check.
+func subMap(m map[string]any, key string) map[string]any {
+	sub, _ := m[key].(map[string]any)
+	return sub
 }
 
 func parseMudiSystem(s *Status, root map[string]any) {

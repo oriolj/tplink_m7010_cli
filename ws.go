@@ -39,13 +39,14 @@ type wsConn struct {
 }
 
 // dialWS opens a WebSocket to ws://addr<path> with the given Cookie
-// header. timeout caps both the TCP dial and the handshake.
-func dialWS(addr, path, cookie string, timeout time.Duration) (*wsConn, error) {
-	c, err := net.DialTimeout("tcp", net.JoinHostPort(addr, "80"), timeout)
+// header. `deadline` is the absolute end-of-time for every operation
+// (dial, handshake, and subsequent reads/writes) — set once here, the
+// caller does not need to touch SetDeadline again.
+func dialWS(addr, path, cookie string, deadline time.Time) (*wsConn, error) {
+	c, err := net.DialTimeout("tcp", net.JoinHostPort(addr, "80"), time.Until(deadline))
 	if err != nil {
 		return nil, fmt.Errorf("ws dial: %w", err)
 	}
-	deadline := time.Now().Add(timeout)
 	c.SetDeadline(deadline)
 
 	keyBytes := make([]byte, 16)
@@ -152,7 +153,7 @@ func (w *wsConn) sendText(payload string) error {
 	data := []byte(payload)
 	plen := len(data)
 	var hdr []byte
-	hdr = append(hdr, 0x80|wsOpcodeText) // FIN + text
+	hdr = append(hdr, 0x80|wsOpcodeText)
 	switch {
 	case plen < 126:
 		hdr = append(hdr, 0x80|byte(plen))
