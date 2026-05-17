@@ -489,6 +489,51 @@ Note the field-type quirks: `rsrp`/`rsrq`/`sinr` come as **decimal
 strings** (e.g. `"-79"`); `traffic_total` is also a decimal string in
 bytes; `band` and `*_level` fields are real numbers.
 
+#### Network-type label mapping
+
+`cell_info.mode` is the raw 3GPP radio mode from the Quectel modem
+(e.g. `NR5G-NSA`, `LTE-CA`). `friendlyNetworkType` in `mudi.go` maps it
+onto the short generation labels phone UIs use:
+
+| `cell_info.mode` (raw)                                | Label |
+| ----------------------------------------------------- | ----- |
+| `NR5G-SA`, `5G-SA`, `NR-SA`                           | `5G+` |
+| `NR5G-NSA`, `5G-NSA`, `NR-NSA`, `NR5G`, `5G`          | `5G`  |
+| `LTE-CA`, `LTE-A`, `LTE-ADVANCED`                     | `4G+` |
+| `LTE`, `4G`                                           | `4G`  |
+| `HSPA+`, `HSPAP`, `DC-HSDPA`, `DC-HSPA+`              | `3G+` |
+| `WCDMA`, `UMTS`, `HSPA`, `HSDPA`, `HSUPA`             | `3G`  |
+| `EDGE`, `GPRS-EDGE`                                   | `2G+` |
+| `GSM`, `GPRS`                                         | `2G`  |
+| anything else                                         | raw   |
+
+The 5G-NSA → "5G" and 5G-SA → "5G+" convention matches Android's
+`5G` vs `5G_PLUS` icons. Some carriers and iOS releases use `5G+` to
+mean mmWave specifically — the Mudi 7's modem report doesn't include a
+band-class field at this granularity, so we go by the SA/NSA split,
+which is the next-best proxy for "real" 5G capability.
+
+Unknown modes fall through to the raw string so the user can see
+what to add to the table.
+
+#### WebSocket lifecycle
+
+`MudiClient.collectCellular` opens the WS, subscribes to every topic
+in `mudiSubscribeEvents`, reads until we have a complete picture (or
+the 2s timeout), then `defer ws.close()` sends a close frame and tears
+down the TCP socket. The server drops all subscriptions when the
+connection closes — no explicit `unsubscribe` needed.
+
+If the router goes offline mid-fetch, `readMessage` returns EOF or
+hits the read deadline; the deferred `close()` then tries to send a
+close frame on a dead socket and silently fails, which is fine.
+
+The WS is opened and torn down on every Fetch() (every waybar/noctalia
+tick, every TUI refresh). Keeping it open across ticks would save the
+~50ms subscribe round-trip but would also complicate "router goes
+away" handling and add per-process state to a binary that's meant to
+stay one-shot. The current cost is dominated by RPC login, not WS.
+
 #### Underlying ubus services (visible over SSH)
 
 `ubus list | grep cellular` on the Mudi 7 shows:

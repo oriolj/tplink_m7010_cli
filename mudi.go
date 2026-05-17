@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -326,6 +327,34 @@ func mapList(v any) []map[string]any {
 	return out
 }
 
+// friendlyNetworkType maps Quectel's 3GPP mode strings onto the short
+// generation labels phone UIs use. We treat 5G-SA as "5G+" (true 5G core)
+// and 5G-NSA as "5G" (anchored to LTE), matching Android's 5G_PLUS vs 5G
+// icon convention. LTE-CA / LTE-A becomes "4G+", HSPA+/DC-HSDPA "3G+";
+// see PROTOCOL_GLINET.md for the full table. Unknown modes fall through
+// to the raw label so we don't silently drop information.
+func friendlyNetworkType(mode string) string {
+	switch strings.ToUpper(mode) {
+	case "NR5G-SA", "5G-SA", "NR-SA":
+		return "5G+"
+	case "NR5G-NSA", "5G-NSA", "NR-NSA", "NR5G", "5G":
+		return "5G"
+	case "LTE-CA", "LTE-A", "LTE-ADVANCED", "4G+":
+		return "4G+"
+	case "LTE", "4G":
+		return "4G"
+	case "HSPA+", "HSPAP", "HSPA-PLUS", "DC-HSDPA", "DC-HSPA+", "3G+":
+		return "3G+"
+	case "WCDMA", "UMTS", "HSPA", "HSDPA", "HSUPA", "3G":
+		return "3G"
+	case "EDGE", "GPRS-EDGE", "2G+":
+		return "2G+"
+	case "GSM", "GPRS", "2G":
+		return "2G"
+	}
+	return mode
+}
+
 // applyCellular maps the WebSocket-derived snapshot onto the Status
 // struct shared with the M7010 path. We pick the SIM that's actually
 // dialled — `dial_status: 0` (success) — and use its slot to match up
@@ -352,7 +381,7 @@ func applyCellular(s *Status, c cellularSnapshot) {
 		}
 		if cell, ok := ni["cell_info"].(map[string]any); ok {
 			if mode := jsonStr(cell, "mode"); mode != "" {
-				s.NetworkType = mode // "NR5G-NSA", "LTE", etc.
+				s.NetworkType = friendlyNetworkType(mode)
 			}
 			s.Band = jsonInt(cell, "band")
 			// rsrp/rsrq/sinr come as decimal strings — reuse jsonFloatStr,
