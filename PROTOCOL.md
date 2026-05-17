@@ -5,6 +5,10 @@ real device (firmware `3.0.3 Build 250814 Rel.1021n`, HW `M7010(EU) v3.2`).
 Much of this is undocumented; the few resources on the open internet target
 the M7350 or M7200 and partially differ from the M7010.
 
+> The other device this binary supports — the GL.iNet Mudi GL-E5800 — has
+> its own wire format and notes at `PROTOCOL_GLINET.md`. Everything below
+> is M7010-specific.
+
 ## Endpoints
 
 All over plain HTTP on the LAN-side address (default `192.168.0.1`):

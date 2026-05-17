@@ -1,21 +1,15 @@
 #!/usr/bin/env bash
-# Waybar module: TP-Link M7010 status.
-# When the modem is unreachable, outputs nothing so waybar hides the module.
+# Waybar module: hotspot status (TP-Link M7010 or GL.iNet Mudi GL-E5800).
+#
+# The binary autodetects which router is on the LAN and emits an empty JSON
+# object ({"text":"", …}) when nothing is reachable, so waybar can hide the
+# module without us needing a TCP probe here. Passwords come from
+# $HOME/.config/tplink-m7010/password (M7010) or
+# $HOME/.config/gl-e5800/password (Mudi) — the binary picks the right one
+# based on which device it detects.
 
 set -u
 
-ADDR="192.168.0.1"
-PASS_FILE="$HOME/.config/tplink-m7010/password"
-BIN="$HOME/.local/bin/tplink-m7010"
+BIN="${TPLINK_M7010_BIN:-$HOME/.local/bin/tplink-m7010}"
 
-# Quick reachability check (TCP connect, 500ms timeout). If it fails, exit silently.
-if ! timeout 0.5 bash -c "echo >/dev/tcp/${ADDR}/80" 2>/dev/null; then
-    exit 0
-fi
-
-if [[ ! -r "$PASS_FILE" ]]; then
-    exit 0
-fi
-
-PASS=$(<"$PASS_FILE")
-TPLINK_PASS="$PASS" TPLINK_ADDR="$ADDR" "$BIN" --waybar 2>/dev/null
+exec "$BIN" --waybar 2>/dev/null

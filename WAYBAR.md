@@ -4,16 +4,21 @@
 
 | Path                                     | Contents                                    | Perms |
 | ---------------------------------------- | ------------------------------------------- | ----- |
-| `~/.local/bin/tplink-m7010`              | Compiled binary                             | 755   |
-| `~/.config/tplink-m7010/password`        | Plain password, one line, no trailing space | 600   |
+| `~/.local/bin/tplink-m7010`              | Compiled binary (autodetects M7010 / Mudi)  | 755   |
+| `~/.config/tplink-m7010/password`        | M7010 admin password, one line              | 600   |
+| `~/.config/gl-e5800/password`            | Mudi (GL-E5800) admin password, one line    | 600   |
 | `~/.config/waybar/scripts/mifi.sh`       | Wrapper used by the module                  | 755   |
 | `~/.config/waybar/scripts/mifi-tui.sh`   | on-click handler — opens TUI in `$TPLINK_TERM` (default `ghostty`) | 755 |
 
-The wrapper script is the important piece — it short-circuits with no output
-when the modem isn't on the LAN (TCP connect check with 500ms timeout), which
-makes waybar hide the module entirely instead of showing an error state.
-Without this, disconnecting from the M7010 would leave a stale/failing tile on
-the bar.
+You only need whichever password file matches the device(s) you actually
+use. The binary autodetects which router is on the LAN — preferring the
+default-gateway match — and reads the matching file.
+
+The wrapper script itself is now a one-line `exec` of the binary in
+`--waybar` mode; the silence-when-unreachable behaviour and the device
+selection both live inside the Go binary. (Older versions of the
+wrapper did a TCP probe in bash and only worked for the M7010 — the
+new wrapper has no device-specific knowledge.)
 
 ## waybar config changes
 
@@ -48,13 +53,20 @@ pkill -SIGUSR2 waybar     # waybar reloads config on SIGUSR2
 
 ## Troubleshooting
 
-- **Module silently missing when connected** — run the wrapper directly:
-  `~/.config/waybar/scripts/mifi.sh`. If it prints nothing, the reachability
-  check is failing; confirm you're actually on the M7010's Wi-Fi and that
-  `192.168.0.1:80` is reachable.
-- **"login failed (code 1)"** — wrong password. `result: 1` on step 2 is
-  `DontMatch`. Re-check `~/.config/tplink-m7010/password` (no trailing
-  newline issues: the wrapper uses `$(<file)` which trims the final newline).
-- **Garbled output / decrypt errors after firmware update** — TP-Link could
-  change the transport. Re-run with `--debug --raw` and compare against the
-  examples in `PROTOCOL.md`.
+- **Module silently missing when connected** — run the binary directly:
+  `~/.local/bin/tplink-m7010 --waybar`. An empty JSON object means
+  autodetect didn't find a supported router. Check `ip route show default`
+  — autodetect prefers a default gateway that matches a known device IP
+  (`192.168.0.1` for M7010, `192.168.8.1` for Mudi).
+- **"login failed" / "Access denied"** — wrong password. For the M7010,
+  `result: 1` on step 2 is `DontMatch`. Re-check the password file
+  (`~/.config/tplink-m7010/password` or `~/.config/gl-e5800/password` —
+  no trailing newline issues; readers trim them).
+- **Garbled output / decrypt errors after firmware update** — TP-Link or
+  GL.iNet may have changed the transport. Re-run with `--debug --raw` and
+  compare against the examples in `PROTOCOL.md` (M7010) or
+  `PROTOCOL_GLINET.md` (Mudi).
+- **Wrong device picked by autodetect** — force a specific device with
+  `--device m7010` / `--device mudi`. If autodetect is wrong because two
+  routers' default IPs are both accepted on the LAN, the default-gateway
+  signal should be reliable; if it isn't, file a bug.

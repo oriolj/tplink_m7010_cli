@@ -87,3 +87,50 @@ about reachability, the bash wrapper handles UX.
   `PROTOCOL.md` module table), just not needed for the waybar use case.
 - **A recorded-response test harness.** Would make the crypto code
   regression-testable without a device. Deferred.
+
+## Attempt 5 — adding the GL.iNet Mudi (GL-E5800)
+
+The Mudi 7 runs OpenWrt 22.03 with GL.iNet's gl-sdk4 packages on top, and
+exposes a JSON-RPC API at `POST /rpc`. Auth is challenge/response, not
+session-cookie. The two interesting landmines:
+
+1. **`crypt(3)` with the `$5$` SHA-256 algorithm.** Go's stdlib has no
+   crypt. Pulled in a 120-line implementation in `crypt.go`, cross-checked
+   byte-for-byte against `openssl passwd -5 -salt SALT KEY`. Could've
+   pulled in `GehirnInc/crypt` but the existing repo style is "roll your
+   own crypto when stdlib refuses" (see the M7010's hand-rolled RSA).
+2. **`params[3]` must be a JSON array.** Authenticated calls have the
+   shape `{"method":"call","params":[sid, service, method, args]}`, and
+   `args` is rejected as `Invalid params` when it's `{}`. Even nullary
+   methods need `[]`. This wasted a half hour of "the service must not
+   exist" probing before I noticed that `[]` made `system.get_status`
+   answer with a giant payload.
+
+The 4.x API docs at `dev.gl-inet.com/router-4.x-api/` have been offline
+since early 2024, so the method catalog in `PROTOCOL_GLINET.md` is built
+from `python-glinet`, the gl-sdk4 ipk list on github, and live probing.
+
+## Attempt 6 — making autodetect not pick the wrong device
+
+A naive parallel TCP probe to both default addresses claimed the M7010
+was reachable when only the Mudi was on the LAN — `192.168.0.1:80` was
+accepted (likely by upstream NAT or a stale ARP entry) but the
+connection then timed out at the application layer. Switched to
+"default gateway first, TCP probe as fallback" in `detectDevice`. The
+gateway signal is essentially free (one `/proc/net/route` read) and
+unambiguous because it's literally where our packets are going.
+
+## Attempt 7 — running the same binary against two devices
+
+The `Device` interface in `device.go` is intentionally tiny (Connect,
+Fetch, Shutdown, Reboot, Close, Name, Addr). Sharing the `Status`
+struct between protocols meant the TUI / waybar / noctalia output
+formatters didn't need a single change — every protocol-specific
+field-name guess lives inside the per-device client.
+
+Password and address resolution moved into `device.go` so the
+per-device env vars (`M7010_PASS` / `MUDI_PASS`) and password files
+(`~/.config/tplink-m7010/password` / `~/.config/gl-e5800/password`) are
+discovered from one place. `TPLINK_PASS` / `TPLINK_ADDR` / `GLINET_PASS`
+are accepted as alternate spellings — none is preferred, neither file
+path is preferred. Both devices are first-class.

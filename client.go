@@ -79,6 +79,25 @@ func NewClient(addr string, debug bool) *Client {
 	}
 }
 
+// Device interface shims around the M7010 methods below.
+
+func (c *Client) Name() string                  { return "TP-Link M7010" }
+func (c *Client) Connect(password string) error { return c.Login(password) }
+func (c *Client) Close()                        { c.Logout() }
+
+func (c *Client) Fetch() (*Status, error) {
+	s, err := c.GetStatus()
+	if err != nil {
+		return nil, fmt.Errorf("status: %w", err)
+	}
+	if err := c.GetFlowStats(s); err != nil {
+		return nil, fmt.Errorf("flowstat: %w", err)
+	}
+	return s, nil
+}
+
+var _ Device = (*Client)(nil)
+
 func (c *Client) debugf(format string, args ...any) {
 	if c.debug {
 		fmt.Printf("[DEBUG] "+format, args...)
@@ -456,11 +475,11 @@ type Status struct {
 	TxSpeed string
 	RxSpeed string
 
-	TotalBytes      float64
-	DailyBytes      float64
-	AdjustedBytes   float64
-	MonthLimitBytes float64
-	PaymentDay      int
+	TotalBytes       float64
+	DailyBytes       float64
+	AdjustedBytes    float64
+	MonthLimitBytes  float64
+	PaymentDay       int
 	ConnectedDevices int
 
 	RawStatus   map[string]any

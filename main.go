@@ -1,19 +1,28 @@
 // Command tplink-m7010 reads connection, signal, battery and data-usage state
-// from a TP-Link M7010 mobile Wi-Fi hotspot. Three modes:
+// from a mobile Wi-Fi hotspot and renders it as one of:
 //
-//   - default: interactive Bubble Tea TUI dashboard
-//   - --waybar: single JSON line for use as a waybar custom module
-//   - --raw:    decrypted raw API responses, for debugging / exploration
+//   - default:    interactive Bubble Tea TUI dashboard
+//   - --waybar:   single JSON line for use as a waybar custom module
+//   - --noctalia: single JSON line for the noctalia-shell CustomButton widget
+//   - --raw:      raw API responses, for debugging / exploration
 //
-// Configuration is by flag or by TPLINK_ADDR / TPLINK_PASS env vars.
-// See PROTOCOL.md for wire-format details and CLAUDE.md for guidance on
-// modifying the crypto.
+// Two device families are supported in the same binary:
+//
+//   - TP-Link M7010 (AES+RSA envelope; see PROTOCOL.md, client.go)
+//   - GL.iNet Mudi GL-E5800 (OpenWrt JSON-RPC; see PROTOCOL_GLINET.md, mudi.go)
+//
+// By default the daemon TCP-probes both default addresses in parallel and
+// talks only to whichever answers first — if neither is reachable, widget
+// modes emit empty output and exit so the laptop battery isn't burned on
+// pointless retries. Use `--device m7010|mudi` to skip autodetect, or
+// `--addr` to override the address for the selected device.
 package main
 
 import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -24,33 +33,44 @@ import (
 )
 
 var (
-	flagAddr     = flag.String("addr", "192.168.0.1", "modem IP address")
-	flagPass     = flag.String("pass", "admin", "admin password")
+	flagDevice   = flag.String("device", "", "router model (autodetect by default)")
+	flagAddr     = flag.String("addr", "", "router IP address (overrides per-device default)")
+	flagPass     = flag.String("pass", "", "admin password (overrides env var and password file)")
 	flagWaybar   = flag.Bool("waybar", false, "output waybar JSON and exit")
+	flagNoctalia = flag.Bool("noctalia", false, "output noctalia-shell CustomButton JSON and exit")
 	flagRaw      = flag.Bool("raw", false, "dump raw API responses and exit")
 	flagDebug    = flag.Bool("debug", false, "print debug HTTP traffic")
-	flagPoweroff = flag.Bool("poweroff", false, "power the modem off and exit")
-	flagReboot   = flag.Bool("reboot", false, "reboot the modem and exit")
+	flagPoweroff = flag.Bool("poweroff", false, "power the router off and exit")
+	flagReboot   = flag.Bool("reboot", false, "reboot the router and exit")
 	flagRefresh  = flag.Duration("refresh", 10*time.Second, "TUI refresh interval")
 )
 
-func main() {
-	flag.Parse()
+const detectTimeout = 500 * time.Millisecond
 
-	if p := os.Getenv("TPLINK_PASS"); p != "" {
-		*flagPass = p
+type powerAction string
+
+const (
+	powerShutdown powerAction = "shutdown"
+	powerReboot   powerAction = "reboot"
+)
+
+func main() {
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s (devices: %s):\n",
+			os.Args[0], supportedIDs())
+		flag.PrintDefaults()
 	}
-	if a := os.Getenv("TPLINK_ADDR"); a != "" {
-		*flagAddr = a
-	}
+	flag.Parse()
 
 	switch {
 	case *flagPoweroff:
-		runPower("shutdown")
+		runPower(powerShutdown)
 	case *flagReboot:
-		runPower("reboot")
+		runPower(powerReboot)
 	case *flagWaybar:
 		runWaybar()
+	case *flagNoctalia:
+		runNoctalia()
 	case *flagRaw:
 		runRaw()
 	default:
@@ -58,25 +78,56 @@ func main() {
 	}
 }
 
-func runPower(action string) {
-	c := NewClient(*flagAddr, *flagDebug)
-	if err := c.Login(*flagPass); err != nil {
-		fmt.Fprintf(os.Stderr, "login: %v\n", err)
+// pickDevice honours --device if set, otherwise autodetects. Returns nil
+// when nothing is reachable; widget callers turn that into empty JSON.
+func pickDevice() *SupportedDevice {
+	if *flagDevice != "" {
+		d := findDeviceByID(*flagDevice)
+		if d == nil {
+			fmt.Fprintf(os.Stderr, "unknown --device %q (supported: %s)\n",
+				*flagDevice, supportedIDs())
+			os.Exit(2)
+		}
+		return d
+	}
+	return detectDevice(detectTimeout)
+}
+
+// reachable returns true if a TCP connection to addr:80 succeeds within
+// timeout. Used by detectDevice's fallback path.
+func reachable(addr string, timeout time.Duration) bool {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(addr, "80"), timeout)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+func runPower(action powerAction) {
+	d := pickDevice()
+	if d == nil {
+		fmt.Fprintln(os.Stderr, "no supported router reachable")
 		os.Exit(1)
 	}
+	dev, err := openDevice(d, *flagAddr, *flagPass, *flagDebug)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "login (%s): %v\n", d.Title, err)
+		os.Exit(1)
+	}
+	defer dev.Close()
 
-	var err error
 	switch action {
-	case "shutdown":
-		err = c.Shutdown()
-	case "reboot":
-		err = c.Reboot()
+	case powerShutdown:
+		err = dev.Shutdown()
+	case powerReboot:
+		err = dev.Reboot()
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", action, err)
 		os.Exit(1)
 	}
-	fmt.Printf("%s command sent\n", action)
+	fmt.Printf("%s command sent to %s\n", action, d.Title)
 }
 
 // --- Waybar mode ---
@@ -89,150 +140,202 @@ type WaybarOutput struct {
 }
 
 func runWaybar() {
-	// One-shot; skip Logout to save a round-trip — the modem expires tokens itself.
-	status, err := fetchStatusOneShot(false)
+	enc := json.NewEncoder(os.Stdout)
+	d := pickDevice()
+	if d == nil {
+		enc.Encode(WaybarOutput{})
+		return
+	}
+	status, err := fetchOnce(d)
 	if err != nil {
-		out := WaybarOutput{
+		// Render an error tooltip and exit 0 so waybar shows it instead
+		// of treating the module as failed.
+		enc.Encode(WaybarOutput{
 			Text:    " --",
 			Tooltip: "Error: " + err.Error(),
 			Class:   "disconnected",
-		}
-		json.NewEncoder(os.Stdout).Encode(out)
-		os.Exit(1)
+		})
+		return
 	}
-
-	signal := signalBars(status.SignalStrength)
-	dataGB := bytesToGB(status.TotalBytes)
-	limitGB := bytesToGB(status.MonthLimitBytes)
-
-	text := fmt.Sprintf("%s %s  %d%%  %.1fGB",
-		status.NetworkType, signal, status.BatteryPercent, dataGB)
-
-	var tooltip strings.Builder
-	fmt.Fprintf(&tooltip, "Connection: %s", status.NetworkType)
-	if status.Operator != "" {
-		fmt.Fprintf(&tooltip, " (%s)", status.Operator)
-	}
-	if status.Band > 0 {
-		fmt.Fprintf(&tooltip, " B%d", status.Band)
-	}
-	fmt.Fprintf(&tooltip, "\n")
-	fmt.Fprintf(&tooltip, "Signal: %d/5 %s  RSRP: %d dBm\n", status.SignalStrength, signal, status.RSRP)
-	if status.BatteryCharging {
-		fmt.Fprintf(&tooltip, "Battery: %d%% (charging)\n", status.BatteryPercent)
-	} else {
-		fmt.Fprintf(&tooltip, "Battery: %d%%\n", status.BatteryPercent)
-	}
-	fmt.Fprintf(&tooltip, "Data Used: %.2f GB", dataGB)
-	if limitGB > 0 {
-		fmt.Fprintf(&tooltip, " / %.0f GB", limitGB)
-	}
-	fmt.Fprintf(&tooltip, "\n")
-	if status.WanIP != "" {
-		fmt.Fprintf(&tooltip, "WAN IP: %s\n", status.WanIP)
-	}
-	if status.ConnectedDevices > 0 {
-		fmt.Fprintf(&tooltip, "Devices: %d", status.ConnectedDevices)
-	}
-
-	class := "good"
-	if status.BatteryPercent < 20 {
-		class = "critical"
-	} else if status.BatteryPercent < 40 {
-		class = "warning"
-	}
-	if status.NetworkType == "" || status.NetworkType == "No Service" {
-		class = "disconnected"
-	}
-
-	json.NewEncoder(os.Stdout).Encode(WaybarOutput{
+	text, tooltip, class := formatStatusLine(d, status)
+	enc.Encode(WaybarOutput{
 		Text:    text,
-		Tooltip: tooltip.String(),
+		Tooltip: tooltip,
 		Class:   class,
 		Alt:     status.NetworkType,
 	})
 }
 
+// --- Noctalia mode ---
+
+type noctaliaOutput struct {
+	Text      string `json:"text"`
+	Tooltip   string `json:"tooltip"`
+	TextColor string `json:"textColor,omitempty"`
+}
+
+func classToNoctaliaColor(class string) string {
+	switch class {
+	case "warning":
+		return "secondary"
+	case "critical":
+		return "error"
+	default:
+		return "none"
+	}
+}
+
+func runNoctalia() {
+	enc := json.NewEncoder(os.Stdout)
+	d := pickDevice()
+	if d == nil {
+		enc.Encode(noctaliaOutput{})
+		return
+	}
+	status, err := fetchOnce(d)
+	if err != nil {
+		enc.Encode(noctaliaOutput{})
+		return
+	}
+	text, tooltip, class := formatStatusLine(d, status)
+	enc.Encode(noctaliaOutput{
+		Text:      text,
+		Tooltip:   strings.TrimRight(tooltip, "\n"),
+		TextColor: classToNoctaliaColor(class),
+	})
+}
+
+// formatStatusLine builds the shared widget text + tooltip + class string.
+// Both waybar and noctalia drive their styling off the same data.
+func formatStatusLine(d *SupportedDevice, s *Status) (text, tooltip, class string) {
+	signal := signalBars(s.SignalStrength)
+	dataGB := bytesToGB(s.TotalBytes)
+	limitGB := bytesToGB(s.MonthLimitBytes)
+
+	netLabel := s.NetworkType
+	if netLabel == "" {
+		netLabel = "—"
+	}
+	text = fmt.Sprintf("%s %s  %d%%  %.1fGB",
+		netLabel, signal, s.BatteryPercent, dataGB)
+
+	var tb strings.Builder
+	fmt.Fprintf(&tb, "%s\n", d.Title)
+	fmt.Fprintf(&tb, "Connection: %s", netLabel)
+	if s.Operator != "" {
+		fmt.Fprintf(&tb, " (%s)", s.Operator)
+	}
+	if s.Band > 0 {
+		fmt.Fprintf(&tb, " B%d", s.Band)
+	}
+	fmt.Fprintf(&tb, "\n")
+	fmt.Fprintf(&tb, "Signal: %d/5 %s", s.SignalStrength, signal)
+	if s.RSRP != 0 {
+		fmt.Fprintf(&tb, "  RSRP: %d dBm", s.RSRP)
+	}
+	fmt.Fprintf(&tb, "\n")
+	if s.BatteryCharging {
+		fmt.Fprintf(&tb, "Battery: %d%% (charging)\n", s.BatteryPercent)
+	} else {
+		fmt.Fprintf(&tb, "Battery: %d%%\n", s.BatteryPercent)
+	}
+	fmt.Fprintf(&tb, "Data Used: %.2f GB", dataGB)
+	if limitGB > 0 {
+		fmt.Fprintf(&tb, " / %.0f GB", limitGB)
+	}
+	fmt.Fprintf(&tb, "\n")
+	if s.WanIP != "" {
+		fmt.Fprintf(&tb, "WAN IP: %s\n", s.WanIP)
+	}
+	if s.ConnectedDevices > 0 {
+		fmt.Fprintf(&tb, "Devices: %d", s.ConnectedDevices)
+	}
+	tooltip = tb.String()
+
+	class = "good"
+	if s.BatteryPercent < 20 {
+		class = "critical"
+	} else if s.BatteryPercent < 40 {
+		class = "warning"
+	}
+	if s.NetworkType == "" || s.NetworkType == "No Service" {
+		class = "disconnected"
+	}
+	return text, tooltip, class
+}
+
 // --- Raw dump mode ---
 
 func runRaw() {
-	status, err := fetchStatusOneShot(true)
+	d := pickDevice()
+	if d == nil {
+		fmt.Fprintln(os.Stderr, "no supported router reachable")
+		os.Exit(1)
+	}
+	status, err := fetchOnce(d)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	fmt.Println("=== Status Response ===")
+	fmt.Printf("=== %s — Status ===\n", d.Title)
 	enc.Encode(status.RawStatus)
-	fmt.Println("\n=== FlowStat Response ===")
-	enc.Encode(status.RawFlowStat)
+	if status.RawFlowStat != nil {
+		fmt.Println("\n=== Flow / Modem ===")
+		enc.Encode(status.RawFlowStat)
+	}
 }
 
-// fetchStatusOneShot logs in, reads, and optionally logs out. Logout is
-// skipped in waybar mode (one-shot, fire-and-forget) to save a round-trip.
-func fetchStatusOneShot(doLogout bool) (*Status, error) {
-	c := NewClient(*flagAddr, *flagDebug)
-	if err := c.Login(*flagPass); err != nil {
-		return nil, fmt.Errorf("login: %w", err)
-	}
-	if doLogout {
-		defer c.Logout()
-	}
-	return fetchInto(c)
-}
-
-func fetchInto(c *Client) (*Status, error) {
-	status, err := c.GetStatus()
+// fetchOnce opens a session and fetches status. We deliberately skip
+// Close: the router ages sessions out on its own, and logging out costs
+// a full extra round-trip on every waybar/noctalia tick.
+func fetchOnce(d *SupportedDevice) (*Status, error) {
+	dev, err := openDevice(d, *flagAddr, *flagPass, *flagDebug)
 	if err != nil {
-		return nil, fmt.Errorf("status: %w", err)
+		return nil, err
 	}
-	if err := c.GetFlowStats(status); err != nil {
-		return nil, fmt.Errorf("flowstat: %w", err)
-	}
-	return status, nil
+	return dev.Fetch()
 }
 
 // --- TUI mode ---
 //
-// The TUI keeps a single logged-in Client across ticks instead of
-// re-authenticating every refresh. On any error the client is dropped and
-// the next tick re-logs in.
+// The TUI keeps a single logged-in device across ticks. On error the
+// device is closed and the next tick reconnects.
 
 var (
-	tuiClient   *Client
-	tuiClientMu sync.Mutex
+	tuiDevice   Device
+	tuiDeviceMu sync.Mutex
 )
 
-func tuiFetch() (*Status, error) {
-	tuiClientMu.Lock()
-	defer tuiClientMu.Unlock()
+func tuiFetch(d *SupportedDevice) (*Status, error) {
+	tuiDeviceMu.Lock()
+	defer tuiDeviceMu.Unlock()
 
-	if tuiClient == nil {
-		c := NewClient(*flagAddr, *flagDebug)
-		if err := c.Login(*flagPass); err != nil {
-			return nil, fmt.Errorf("login: %w", err)
+	if tuiDevice == nil {
+		dev, err := openDevice(d, *flagAddr, *flagPass, *flagDebug)
+		if err != nil {
+			return nil, err
 		}
-		tuiClient = c
+		tuiDevice = dev
 	}
-
-	status, err := fetchInto(tuiClient)
+	status, err := tuiDevice.Fetch()
 	if err != nil {
-		tuiClient = nil
+		tuiDevice.Close()
+		tuiDevice = nil
 		return nil, err
 	}
 	return status, nil
 }
 
 type model struct {
+	device  *SupportedDevice
 	status  *Status
 	err     error
 	loading bool
 	refresh time.Duration
 
-	// pendingAction is set to "poweroff" or "reboot" after first keypress,
-	// cleared when confirmed (second press) or cancelled (any other key).
-	pendingAction string
+	pendingAction powerAction // "" when no action armed
 	actionResult  string
 }
 
@@ -244,21 +347,23 @@ type statusMsg struct {
 type tickMsg time.Time
 
 type actionMsg struct {
-	action string
+	action powerAction
 	err    error
 }
 
-func initialModel(refresh time.Duration) model {
-	return model{loading: true, refresh: refresh}
+func initialModel(d *SupportedDevice, refresh time.Duration) model {
+	return model{device: d, loading: true, refresh: refresh}
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(fetchCmd, tickCmd(m.refresh))
+	return tea.Batch(fetchCmdFor(m.device), tickCmd(m.refresh))
 }
 
-func fetchCmd() tea.Msg {
-	s, err := tuiFetch()
-	return statusMsg{status: s, err: err}
+func fetchCmdFor(d *SupportedDevice) tea.Cmd {
+	return func() tea.Msg {
+		s, err := tuiFetch(d)
+		return statusMsg{status: s, err: err}
+	}
 }
 
 func tickCmd(d time.Duration) tea.Cmd {
@@ -271,73 +376,70 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		key := msg.String()
-
-		// Second press on the same action key confirms and fires it.
 		if m.pendingAction != "" {
 			switch {
-			case m.pendingAction == "poweroff" && key == "p",
-				m.pendingAction == "reboot" && key == "R":
+			case m.pendingAction == powerShutdown && key == "p",
+				m.pendingAction == powerReboot && key == "R":
 				action := m.pendingAction
 				m.pendingAction = ""
-				m.actionResult = action + "…"
-				return m, actionCmd(action)
+				m.actionResult = string(action) + "…"
+				return m, actionCmdFor(m.device, action)
 			default:
 				m.pendingAction = ""
 				return m, nil
 			}
 		}
-
 		switch key {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
 		case "r":
 			m.loading = true
-			return m, fetchCmd
+			return m, fetchCmdFor(m.device)
 		case "p":
-			m.pendingAction = "poweroff"
+			m.pendingAction = powerShutdown
 		case "R":
-			m.pendingAction = "reboot"
+			m.pendingAction = powerReboot
 		}
 	case statusMsg:
 		m.loading = false
 		m.status = msg.status
 		m.err = msg.err
-		m.actionResult = "" // fresh data — drop stale "reboot sent" notice
+		m.actionResult = ""
 	case tickMsg:
 		m.loading = true
-		return m, tea.Batch(fetchCmd, tickCmd(m.refresh))
+		return m, tea.Batch(fetchCmdFor(m.device), tickCmd(m.refresh))
 	case actionMsg:
 		if msg.err != nil {
-			m.actionResult = msg.action + " failed: " + msg.err.Error()
+			m.actionResult = string(msg.action) + " failed: " + msg.err.Error()
 		} else {
-			m.actionResult = msg.action + " sent"
+			m.actionResult = string(msg.action) + " sent"
 		}
 	}
 	return m, nil
 }
 
-func actionCmd(action string) tea.Cmd {
+func actionCmdFor(d *SupportedDevice, action powerAction) tea.Cmd {
 	return func() tea.Msg {
-		tuiClientMu.Lock()
-		defer tuiClientMu.Unlock()
+		tuiDeviceMu.Lock()
+		defer tuiDeviceMu.Unlock()
 
-		if tuiClient == nil {
-			c := NewClient(*flagAddr, *flagDebug)
-			if err := c.Login(*flagPass); err != nil {
+		if tuiDevice == nil {
+			dev, err := openDevice(d, *flagAddr, *flagPass, *flagDebug)
+			if err != nil {
 				return actionMsg{action: action, err: err}
 			}
-			tuiClient = c
+			tuiDevice = dev
 		}
-
 		var err error
 		switch action {
-		case "poweroff":
-			err = tuiClient.Shutdown()
-		case "reboot":
-			err = tuiClient.Reboot()
+		case powerShutdown:
+			err = tuiDevice.Shutdown()
+		case powerReboot:
+			err = tuiDevice.Reboot()
 		}
-		// The modem drops the connection after either, so the client is stale.
-		tuiClient = nil
+		// The router drops the connection after either, so the device is stale.
+		tuiDevice.Close()
+		tuiDevice = nil
 		return actionMsg{action: action, err: err}
 	}
 }
@@ -376,7 +478,7 @@ func writeRow(b *strings.Builder, label string, valStyle lipgloss.Style, value s
 
 func (m model) View() string {
 	var content strings.Builder
-	content.WriteString(titleStyle.Render("TP-Link M7010"))
+	content.WriteString(titleStyle.Render(m.device.Title))
 	content.WriteByte('\n')
 
 	if m.err != nil {
@@ -461,9 +563,9 @@ func (m model) View() string {
 
 	content.WriteByte('\n')
 	switch {
-	case m.pendingAction == "poweroff":
+	case m.pendingAction == powerShutdown:
 		content.WriteString(warnStyle.Render("Press p again to POWER OFF, any other key to cancel"))
-	case m.pendingAction == "reboot":
+	case m.pendingAction == powerReboot:
 		content.WriteString(warnStyle.Render("Press R again to REBOOT, any other key to cancel"))
 	case m.actionResult != "":
 		content.WriteString(goodStyle.Render(m.actionResult))
@@ -479,7 +581,13 @@ func (m model) View() string {
 }
 
 func runTUI() {
-	p := tea.NewProgram(initialModel(*flagRefresh), tea.WithAltScreen())
+	d := pickDevice()
+	if d == nil {
+		fmt.Fprintln(os.Stderr, "no supported router on the LAN (probed: "+supportedIDs()+")")
+		fmt.Fprintln(os.Stderr, "pass --device to skip autodetect, or check that the router is reachable")
+		os.Exit(1)
+	}
+	p := tea.NewProgram(initialModel(d, *flagRefresh), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
