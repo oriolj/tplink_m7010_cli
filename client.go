@@ -459,7 +459,8 @@ type Status struct {
 	Firmware string
 	Operator string
 
-	NetworkType    string
+	NetworkType    string // short label like "5G", "4G+"
+	NetworkTypeRaw string // technical mode from the modem (e.g. "LTE FDD", "NR5G-NSA"); empty for M7010
 	Band           int
 	ConnectStatus  int
 	SignalStrength int // 0-5; firmware reports 0, we derive from RSRP

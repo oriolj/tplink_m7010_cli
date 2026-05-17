@@ -507,6 +507,13 @@ onto the short generation labels phone UIs use:
 | `GSM`, `GPRS`                                         | `2G`  |
 | anything else                                         | raw   |
 
+Before lookup, the mode is normalised: uppercase, space→`-`, then any
+`-FDD` / `-TDD` substring stripped (duplex is orthogonal to generation
+tier — both Quectel's `"LTE FDD"` and `"LTE-FDD-CA"` collapse onto
+`LTE` / `LTE-CA` respectively). The raw value is also stashed on
+`Status.NetworkTypeRaw` so the widget tooltip can show it in
+parentheses: `Connection: 5G (NR5G-NSA) · Movistar B78`.
+
 The 5G-NSA → "5G" and 5G-SA → "5G+" convention matches Android's
 `5G` vs `5G_PLUS` icons. Some carriers and iOS releases use `5G+` to
 mean mmWave specifically — the Mudi 7's modem report doesn't include a

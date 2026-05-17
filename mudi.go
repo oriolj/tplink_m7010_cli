@@ -315,10 +315,15 @@ func mapList(v any) []map[string]any {
 // generation labels phone UIs use. We treat 5G-SA as "5G+" (true 5G core)
 // and 5G-NSA as "5G" (anchored to LTE), matching Android's 5G_PLUS vs 5G
 // icon convention. LTE-CA / LTE-A becomes "4G+", HSPA+/DC-HSDPA "3G+";
-// see PROTOCOL_GLINET.md for the full table. Unknown modes fall through
-// to the raw label so we don't silently drop information.
+// see PROTOCOL_GLINET.md for the full table.
+//
+// The Quectel modem decorates the mode with the duplex scheme
+// ("LTE FDD", "LTE TDD") and sometimes with separator variants. We
+// normalise both before matching: duplex is orthogonal to the
+// generation tier (a fast 4G+ link can be FDD or TDD), so we strip it.
+// Unknown modes fall through to the raw label.
 func friendlyNetworkType(mode string) string {
-	switch strings.ToUpper(mode) {
+	switch normalizeNetworkMode(mode) {
 	case "NR5G-SA", "5G-SA", "NR-SA":
 		return "5G+"
 	case "NR5G-NSA", "5G-NSA", "NR-NSA", "NR5G", "5G":
@@ -337,6 +342,17 @@ func friendlyNetworkType(mode string) string {
 		return "2G"
 	}
 	return mode
+}
+
+// normalizeNetworkMode uppercases the mode, swaps space for dash, and
+// strips the duplex suffix so "LTE FDD" / "LTE-TDD" / "LTE-FDD-CA" all
+// collapse onto a single canonical key.
+func normalizeNetworkMode(mode string) string {
+	m := strings.ToUpper(mode)
+	m = strings.ReplaceAll(m, " ", "-")
+	m = strings.ReplaceAll(m, "-FDD", "")
+	m = strings.ReplaceAll(m, "-TDD", "")
+	return strings.Trim(m, "-")
 }
 
 // applyCellular maps the WebSocket-derived snapshot onto the Status
@@ -366,6 +382,7 @@ func applyCellular(s *Status, c cellularSnapshot) {
 		if cell := subMap(ni, "cell_info"); cell != nil {
 			if mode := jsonStr(cell, "mode"); mode != "" {
 				s.NetworkType = friendlyNetworkType(mode)
+				s.NetworkTypeRaw = mode
 			}
 			s.Band = jsonInt(cell, "band")
 			// rsrp/rsrq/sinr arrive as decimal strings — jsonInt would

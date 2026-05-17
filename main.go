@@ -223,8 +223,11 @@ func formatStatusLine(d *SupportedDevice, s *Status) (text, tooltip, class strin
 	var tb strings.Builder
 	fmt.Fprintf(&tb, "%s\n", d.Title)
 	fmt.Fprintf(&tb, "Connection: %s", netLabel)
+	if s.NetworkTypeRaw != "" && s.NetworkTypeRaw != netLabel {
+		fmt.Fprintf(&tb, " (%s)", s.NetworkTypeRaw)
+	}
 	if s.Operator != "" {
-		fmt.Fprintf(&tb, " (%s)", s.Operator)
+		fmt.Fprintf(&tb, " · %s", s.Operator)
 	}
 	if s.Band > 0 {
 		fmt.Fprintf(&tb, " B%d", s.Band)
