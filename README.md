@@ -135,6 +135,7 @@ specific landmines.
 | `PROTOCOL_GLINET.md`  | GL.iNet Mudi (GL-E5800) JSON-RPC                                       |
 | `ARCHITECTURE.md`     | Code structure, multi-device flow, TUI model                           |
 | `WAYBAR.md`           | Waybar setup on this specific machine                                  |
+| `PERFORMANCE.md`      | Measured per-tick CPU/RAM/network cost + daily power estimate          |
 | `DEVELOPMENT.md`      | Build log: what was tried, what failed, what stuck                     |
 | `CLAUDE.md`           | Pointers for future Claude Code sessions                               |
 
