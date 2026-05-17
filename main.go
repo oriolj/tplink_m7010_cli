@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -351,6 +352,10 @@ type actionMsg struct {
 	err    error
 }
 
+// noteMsg sets the transient footer text shown below the dashboard. Used
+// for one-shot side effects like "opened web UI" that aren't power actions.
+type noteMsg string
+
 func initialModel(d *SupportedDevice, refresh time.Duration) model {
 	return model{device: d, loading: true, refresh: refresh}
 }
@@ -395,6 +400,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "r":
 			m.loading = true
 			return m, fetchCmdFor(m.device)
+		case "w":
+			return m, openWebUICmd(m.device)
 		case "p":
 			m.pendingAction = powerShutdown
 		case "R":
@@ -414,8 +421,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.actionResult = string(msg.action) + " sent"
 		}
+	case noteMsg:
+		m.actionResult = string(msg)
 	}
 	return m, nil
+}
+
+// openWebUICmd launches the router's web UI in the user's default browser
+// via xdg-open. Uses the --addr override if set, otherwise the device's
+// default address.
+func openWebUICmd(d *SupportedDevice) tea.Cmd {
+	return func() tea.Msg {
+		url := "http://" + resolveAddr(d, *flagAddr) + "/"
+		if err := exec.Command("xdg-open", url).Start(); err != nil {
+			return noteMsg("failed to open " + url + ": " + err.Error())
+		}
+		return noteMsg("opened " + url)
+	}
 }
 
 func actionCmdFor(d *SupportedDevice, action powerAction) tea.Cmd {
@@ -570,7 +592,7 @@ func (m model) View() string {
 	case m.actionResult != "":
 		content.WriteString(goodStyle.Render(m.actionResult))
 	default:
-		footer := "r refresh  p poweroff  R reboot  q quit"
+		footer := "r refresh  w web UI  p poweroff  R reboot  q quit"
 		if m.loading {
 			footer += "  (refreshing…)"
 		}

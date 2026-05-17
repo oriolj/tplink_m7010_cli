@@ -59,6 +59,7 @@ Both devices surface the same set of metrics (where available):
 | Key           | Action                                                        |
 | ------------- | ------------------------------------------------------------- |
 | `r`           | Refresh now                                                   |
+| `w`           | Open the router's web UI in the default browser (xdg-open)    |
 | `p`, then `p` | Power off (first press arms, second confirms)                 |
 | `R`, then `R` | Reboot (first press arms, second confirms)                    |
 | `q` / `esc`   | Quit                                                          |
