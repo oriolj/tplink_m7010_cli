@@ -326,19 +326,19 @@ func friendlyNetworkType(mode string) string {
 	switch normalizeNetworkMode(mode) {
 	case "NR5G-SA", "5G-SA", "NR-SA":
 		return "5G+"
-	case "NR5G-NSA", "5G-NSA", "NR-NSA", "NR5G", "5G":
+	case "NR5G-NSA", "5G-NSA", "NR-NSA", "NR5G":
 		return "5G"
-	case "LTE-CA", "LTE-A", "LTE-ADVANCED", "4G+":
+	case "LTE-CA", "LTE-A", "LTE-ADVANCED":
 		return "4G+"
-	case "LTE", "4G":
+	case "LTE":
 		return "4G"
-	case "HSPA+", "HSPAP", "HSPA-PLUS", "DC-HSDPA", "DC-HSPA+", "3G+":
+	case "HSPA+", "HSPAP", "DC-HSDPA", "DC-HSPA+":
 		return "3G+"
-	case "WCDMA", "UMTS", "HSPA", "HSDPA", "HSUPA", "3G":
+	case "WCDMA", "UMTS", "HSPA", "HSDPA", "HSUPA":
 		return "3G"
-	case "EDGE", "GPRS-EDGE", "2G+":
+	case "EDGE", "GPRS-EDGE":
 		return "2G+"
-	case "GSM", "GPRS", "2G":
+	case "GSM", "GPRS":
 		return "2G"
 	}
 	return mode
