@@ -1,45 +1,56 @@
 # Performance & power impact
 
 This binary is invoked every 30 seconds by noctalia (and on a similar
-cadence by waybar). Numbers below are from running the noctalia
-invocation (`tplink-m7010 --noctalia`) 30 times in a row against a
-live Mudi 7 GL-E5800 (LAN, 1ms RTT, firmware 4.8.3) on a ThinkPad
-X13 Gen 3 (i5-1240P) running Arch Linux.
+cadence by waybar). Numbers below are from two complementary harnesses
+run against a live Mudi 7 GL-E5800 (LAN, 1ms RTT, firmware 4.8.3) on
+a ThinkPad X13 Gen 3 (i5-1240P) running Arch Linux:
 
-Methodology and the Python harness live in `/tmp/measure.py` — it
-wraps `subprocess.run` with `resource.getrusage(RUSAGE_CHILDREN)`
-deltas, and reads `/proc/net/dev` before/after each call to attribute
-network bytes to the gateway interface.
+1. **`/tmp/measure.py`** — Python wrapper, 30 runs. Uses
+   `subprocess.run` + `resource.getrusage(RUSAGE_CHILDREN)` deltas for
+   CPU and reads `/proc/net/dev` before/after to attribute network
+   bytes to the gateway interface. Gives the network number.
+2. **`/usr/bin/time -v`** — GNU time, 30 runs aggregated by
+   `/tmp/measure2.sh`. Gives single-process peak RSS (not inflated by
+   the harness's cumulative `ru_maxrss`) and the context-switch
+   counts.
 
 ## Per-invocation cost
 
-| Metric                           | mean  | median | p95   | min   | max   |
-| -------------------------------- | ----- | ------ | ----- | ----- | ----- |
-| Wall time (ms)                   | 104.6 | 106.9  | 117.8 | 79.8  | 129.1 |
-| CPU user (ms)                    | 4.0   | 4.0    | 7.0   | 0.8   | 7.3   |
-| CPU sys (ms)                     | 7.6   | 7.6    | 10.1  | 5.0   | 10.7  |
-| **CPU total (ms)**               | **11.6** | **11.7** | **13.1** | **8.9** | **13.8** |
-| Peak RSS (cumulative, kB)        | 15192 | 15192  | 15192 | 15176 | 15192 |
-| Page faults — minor              | 732   | 743    | 772   | 686   | 793   |
-| Page faults — major              | 0     | 0      | 0     | 0     | 0     |
-| Block I/O reads                  | 0     | 0      | 0     | 0     | 0     |
-| Block I/O writes                 | 0     | 0      | 0     | 0     | 0     |
-| Network RX (B)                   | 6206  | 5845   | 6186  | 5782  | 11626 |
-| Network TX (B)                   | 3046  | 2654   | 5177  | 2493  | 7771  |
+| Metric                           | mean   | median | p95    | min    | max    | source |
+| -------------------------------- | ------ | ------ | ------ | ------ | ------ | ------ |
+| Wall time (ms)                   | 104.6  | 106.9  | 117.8  | 79.8   | 129.1  | python |
+| CPU user (ms)                    | 4.0    | 4.0    | 7.0    | 0.8    | 7.3    | python |
+| CPU sys (ms)                     | 7.6    | 7.6    | 10.1   | 5.0    | 10.7   | python |
+| **CPU total (ms)**               | **11.6** | **11.7** | **13.1** | **8.9** | **13.8** | python |
+| % of one core during run         | 9.5    | 9.0    | 11     | 7      | 13     | gnu-time |
+| **Peak RSS (per process, kB)**   | **9671** | **9680** | **9936** | **9424** | **10064** | gnu-time |
+| Page faults — minor              | 744    | 736    | 788    | 699    | 795    | gnu-time |
+| Page faults — major              | 0      | 0      | 0      | 0      | 0      | both |
+| Voluntary context switches       | 114    | 116    | 124    | 95     | 132    | gnu-time |
+| Involuntary context switches     | 2.0    | 2.0    | 3.0    | 0      | 5      | gnu-time |
+| Block I/O reads                  | 0      | 0      | 0      | 0      | 0      | both |
+| Block I/O writes                 | 0      | 0      | 0      | 0      | 0      | both |
+| Network RX (B)                   | 6206   | 5845   | 6186   | 5782   | 11626  | python |
+| Network TX (B)                   | 3046   | 2654   | 5177   | 2493   | 7771   | python |
 
 Key observations:
 
 - **Wall is dominated by the WebSocket subscribe + first-burst wait
-  (~80ms after the TCP handshake completes).** CPU work itself is
-  ~12ms across user + sys — that's the SHA-256 crypt for login plus
-  parsing six JSON responses.
-- **Peak RSS ~15 MB.** Bigger than a C equivalent would be but normal
-  for a Go binary with Bubble Tea / lipgloss linked in (cold weight of
-  the Go runtime alone is ~5-7 MB). The cumulative ru_maxrss is
-  capped (every run hits the same ~15 MB peak, not 15 MB × N).
-- **Zero major page faults, zero block I/O.** The 7.5 MB binary stays
-  in the kernel disk cache between ticks, so every invocation is a
-  warm exec.
+  (~80 ms after the TCP handshake).** CPU itself is ~12 ms across
+  user + sys — SHA-256 crypt for login plus parsing six JSON
+  responses.
+- **Peak RSS ~9.7 MB** per process. Normal for a Go binary with
+  Bubble Tea / lipgloss linked in (Go runtime alone is ~5-7 MB).
+  (The Python harness reports ~15 MB because it accumulates
+  `ru_maxrss` across all children; GNU time's per-run number is the
+  honest one.)
+- **~114 voluntary context switches per run, only ~2 involuntary.**
+  The process is almost always blocked on network I/O — the
+  scheduler hands the core to other work cleanly. Almost never gets
+  preempted, which means the per-tick wall time is stable.
+- **Zero major page faults, zero block I/O.** The 7.5 MB binary
+  stays in the kernel disk cache between ticks, so every invocation
+  is a warm exec.
 - **~9 KB of network traffic per tick** (RX+TX), split between the
   RPC login handshake (~3 KB) and the WebSocket burst (~6 KB).
 
@@ -51,7 +62,7 @@ Key observations:
 | ------------------- | -------- | ------------------ |
 | CPU time            | 12 ms    | 33 s (~0.55 min)   |
 | Network bytes       | 9 KB     | 26 MB              |
-| Memory peak         | 15 MB    | 15 MB (not summed — peak is per-process and processes are short-lived) |
+| Memory peak         | 9.7 MB   | 9.7 MB (per-process; processes are short-lived, no carry-over) |
 | Disk I/O            | 0        | 0                  |
 
 **Energy estimate** (rough, Linux laptop):
@@ -115,17 +126,23 @@ two sockets (RPC + WS) being driven.
 
 ## Re-running the measurement
 
+Two harnesses, complementary:
+
 ```sh
+# Python: 30 runs, gives wall + network bytes
 python3 /tmp/measure.py ~/.local/bin/tplink-m7010 30
+
+# GNU time: 30 runs, gives honest per-process RSS + ctx switches
+/tmp/measure2.sh 30
 ```
 
-The script lives in `/tmp/measure.py`; copy it into the repo if you
-want it under version control. With `time` from Arch's `extra` repo
-(`sudo pacman -S time`), you can also get a quick spot-check:
+Both scripts are kept in `/tmp` so they don't clutter the repo; copy
+them in if you want them version-controlled. For a quick spot-check
+without writing any wrapper:
 
 ```sh
 /usr/bin/time -v ~/.local/bin/tplink-m7010 --noctalia
 ```
 
-— that gives you peak RSS, voluntary/involuntary context switches,
-and page-fault counts without writing any wrapper.
+(GNU time is `pacman -S time` on Arch — installs to `/usr/bin/time`,
+distinct from the shell built-in.)
