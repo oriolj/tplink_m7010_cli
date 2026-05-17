@@ -146,6 +146,35 @@ func (w *wsConn) readMessage() ([]byte, error) {
 	}
 }
 
+// sendText writes a text frame. Client→server frames are mask-required
+// per RFC 6455 §5.3.
+func (w *wsConn) sendText(payload string) error {
+	data := []byte(payload)
+	plen := len(data)
+	var hdr []byte
+	hdr = append(hdr, 0x80|wsOpcodeText) // FIN + text
+	switch {
+	case plen < 126:
+		hdr = append(hdr, 0x80|byte(plen))
+	case plen < 65536:
+		hdr = append(hdr, 0x80|126, byte(plen>>8), byte(plen))
+	default:
+		hdr = append(hdr, 0x80|127)
+		var ext [8]byte
+		binary.BigEndian.PutUint64(ext[:], uint64(plen))
+		hdr = append(hdr, ext[:]...)
+	}
+	var mask [4]byte
+	rand.Read(mask[:])
+	hdr = append(hdr, mask[:]...)
+	masked := make([]byte, plen)
+	for i, b := range data {
+		masked[i] = b ^ mask[i%4]
+	}
+	_, err := w.c.Write(append(hdr, masked...))
+	return err
+}
+
 // close sends a close frame and tears down the connection. Best-effort.
 func (w *wsConn) close() error {
 	// Close frame, masked from client side per RFC 6455 §5.3. Empty body.

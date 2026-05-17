@@ -424,37 +424,70 @@ service was tried (`modem.get_status`, `cellular.*`, `5g.*`, `4g.*`,
 browser uses it for the dashboard's live tile and there's no HTTP-side
 equivalent.
 
-#### Subscribe protocol: unknown
+#### Subscribe protocol
 
-A bare WebSocket open is **not** enough to start receiving events. With
-the browser closed (so no other session can be hogging the stream), my
-plain client gets the `101 Switching Protocols` response and then
-silence for 30+ seconds. The server isn't pushing autonomously — the
-browser must send something on the WS to subscribe.
+A bare WebSocket open is silent — the server pushes nothing until the
+client subscribes per topic. The shape is dead simple:
 
-What I tried that **didn't** work:
+```json
+{"cmd":"subscribe","name":"<event.name>"}
+```
 
-- `{"id":1,"jsonrpc":"2.0","method":"subscribe","params":[…]}` with a
-  bunch of param shapes (service name string, `{event}` object, …)
-- `{"id":1,"method":"call","params":["cellular.status","info",{}]}`
-- `{"sub":"cellular"}`, `{"event":"cellular.status"}`
-- Concurrent RPC calls to `system.get_status` (in case events fire only
-  while the UI is asking for system state)
+One subscribe message per topic. No id, no jsonrpc envelope, no params.
+The server starts pushing the latest snapshot within ~20ms of the
+subscribe, then re-pushes on its internal cycle (~10s for cellular).
+There is no ack — if you subscribed to a name that doesn't exist, the
+server just stays quiet for that name.
 
-What would unblock this:
+This matches the GL.iNet-specific subset of the `owsd` JSON-RPC-over-WS
+protocol (`github.com/paldier/owsd`); GL.iNet replaced owsd's
+JSON-RPC `subscribe` method with this lighter `cmd`-style shape.
 
-- The first outgoing (green) WS frame the browser sends right after the
-  101 response. That's almost certainly the subscribe shape the server
-  expects. (DevTools → Network → click `ws` → Messages tab → look for
-  the very first ▲ green frame.)
-- Or: SSH + `ubus subscribe cellular.status` (and the rest of the
-  `cellular.*` services) to confirm whether events are firing
-  internally at all, or only on demand.
+#### Topics observed in the browser
 
-Until we have the subscribe message, `MudiClient.collectCellular` in
-`mudi.go` connects to the WS but will time out without payload — leaving
-the cellular fields empty while battery / network-online state continue
-to populate from `system.get_status`. The widget falls back gracefully.
+These are the topic names captured from the dashboard's WS traffic.
+`mudi.go` subscribes to the cellular ones; the rest are documented for
+future use:
+
+| Topic                       | Notes                                                    |
+| --------------------------- | -------------------------------------------------------- |
+| `cellular.modems_info`      | Modem hardware (vendor, model, IMEIs, supported bands)   |
+| `cellular.modems_status`    | Modem-level state                                        |
+| `cellular.sims_info`        | SIM identity per slot (iccid, imsi, apn_list, mcc/mnc)   |
+| `cellular.sims_status`      | SIM op state per slot (carrier, strength 0-4, technology) |
+| `cellular.networks_info`    | cell_info{mode, band, rsrp, rsrq, sinr, dl_bandwidth}, ipv4 |
+| `cellular.networks_status`  | traffic_total, dial_status, callcode per slot           |
+| `vpnclient.status`          | VPN client state (WireGuard / OpenVPN / Tailscale)       |
+| `repeater.status`           | WiFi repeater state                                      |
+| `cable.status`              | Ethernet WAN cable state                                 |
+
+The browser only subscribes to topics relevant to whatever page is
+open, so this list grows as you click around different sections of
+the UI. `cmd: unsubscribe` (mirroring `subscribe`) is the assumed
+opposite; not directly verified.
+
+#### Field reference — what we actually use
+
+After subscribing, `mudi.go::applyCellular` picks the SIM whose
+`cellular.networks_status` has `dial_status: 0` (active dial) and
+maps these fields onto `Status`:
+
+| Source event              | Field path                  | Mapped to              |
+| ------------------------- | --------------------------- | ---------------------- |
+| `cellular.sims_status`    | `carrier`                   | `Status.Operator`      |
+| `cellular.sims_status`    | `strength` (0-4)            | `Status.SignalStrength` (+1 → 0-5) |
+| `cellular.networks_info`  | `cell_info.mode`            | `Status.NetworkType`   |
+| `cellular.networks_info`  | `cell_info.band`            | `Status.Band`          |
+| `cellular.networks_info`  | `cell_info.rsrp` (string)   | `Status.RSRP` (int dBm) |
+| `cellular.networks_info`  | `cell_info.rsrq` (string)   | `Status.RSRQ`          |
+| `cellular.networks_info`  | `cell_info.sinr` (string)   | `Status.SNR`           |
+| `cellular.networks_info`  | `cell_info.rsrp_level`      | fallback for SignalStrength when sims_status hasn't arrived yet |
+| `cellular.networks_info`  | `ipv4.ip`                   | `Status.WanIP`         |
+| `cellular.networks_status`| `traffic_total` (string)    | `Status.TotalBytes`    |
+
+Note the field-type quirks: `rsrp`/`rsrq`/`sinr` come as **decimal
+strings** (e.g. `"-79"`); `traffic_total` is also a decimal string in
+bytes; `band` and `*_level` fields are real numbers.
 
 #### Underlying ubus services (visible over SSH)
 

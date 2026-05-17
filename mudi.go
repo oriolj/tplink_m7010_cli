@@ -14,8 +14,7 @@ package main
 //     CPU-integrated 5G modem.
 //
 // See PROTOCOL_GLINET.md for the full wire format, the JSON-RPC error
-// codes, the WS event schema, and the open question of how the browser
-// kicks the WS server into pushing.
+// codes, the WS subscribe protocol, and the event schema.
 
 import (
 	"bytes"
@@ -242,8 +241,22 @@ type cellularSnapshot struct {
 	raw            map[string]any   // everything we saw, for --raw mode
 }
 
-// collectCellular opens the Mudi's event stream and reads until either
-// every event type we care about has arrived or the timeout fires.
+// mudiSubscribeEvents lists the WS event names we ask the server to push.
+// Server is silent until we subscribe — see PROTOCOL_GLINET.md for the
+// owsd-style {"cmd":"subscribe","name":…} protocol. The first burst
+// arrives within ~20ms of subscribing; subsequent updates every ~10s.
+var mudiSubscribeEvents = []string{
+	"cellular.modems_info",     // Quectel hardware: model, IMEIs, supported bands
+	"cellular.modems_status",   // modem-level state
+	"cellular.sims_info",       // SIM identity per slot (iccid, imsi, apn_list)
+	"cellular.sims_status",     // SIM op state per slot (carrier, strength 0-4, technology)
+	"cellular.networks_info",   // cell_info{mode, band, rsrp, rsrq, sinr, dl_bandwidth}, ipv4
+	"cellular.networks_status", // traffic_total, dial_status per slot
+}
+
+// collectCellular opens the Mudi's event stream, subscribes to the
+// cellular topics, and reads until we have a complete picture (or the
+// timeout fires).
 func (m *MudiClient) collectCellular(timeout time.Duration) (cellularSnapshot, error) {
 	var snap cellularSnapshot
 	if m.sid == "" {
@@ -255,10 +268,17 @@ func (m *MudiClient) collectCellular(timeout time.Duration) (cellularSnapshot, e
 	}
 	defer ws.close()
 
-	snap.raw = map[string]any{}
 	deadline := time.Now().Add(timeout)
+	ws.c.SetWriteDeadline(deadline)
 	ws.c.SetReadDeadline(deadline)
 
+	for _, name := range mudiSubscribeEvents {
+		if err := ws.sendText(fmt.Sprintf(`{"cmd":"subscribe","name":%q}`, name)); err != nil {
+			return snap, fmt.Errorf("ws subscribe %s: %w", name, err)
+		}
+	}
+
+	snap.raw = map[string]any{}
 	for {
 		msg, err := ws.readMessage()
 		if err != nil {
