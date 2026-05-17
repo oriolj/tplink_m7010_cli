@@ -232,10 +232,19 @@ func formatStatusLine(d *SupportedDevice, s *Status) (text, tooltip, class strin
 	if s.Band > 0 {
 		fmt.Fprintf(&tb, " B%d", s.Band)
 	}
+	if s.DLBandwidth != "" {
+		fmt.Fprintf(&tb, " @ %s", s.DLBandwidth)
+	}
 	fmt.Fprintf(&tb, "\n")
 	fmt.Fprintf(&tb, "Signal: %d/5 %s", s.SignalStrength, signal)
 	if s.RSRP != 0 {
 		fmt.Fprintf(&tb, "  RSRP: %d dBm", s.RSRP)
+	}
+	if s.RSRQ != 0 {
+		fmt.Fprintf(&tb, "  RSRQ: %d dB", s.RSRQ)
+	}
+	if s.SNR != 0 {
+		fmt.Fprintf(&tb, "  SINR: %d dB", s.SNR)
 	}
 	fmt.Fprintf(&tb, "\n")
 	if s.BatteryCharging {
@@ -252,9 +261,18 @@ func formatStatusLine(d *SupportedDevice, s *Status) (text, tooltip, class strin
 		fmt.Fprintf(&tb, "WAN IP: %s\n", s.WanIP)
 	}
 	if s.ConnectedDevices > 0 {
-		fmt.Fprintf(&tb, "Devices: %d", s.ConnectedDevices)
+		fmt.Fprintf(&tb, "Devices: %d\n", s.ConnectedDevices)
 	}
-	tooltip = tb.String()
+	if s.UptimeSec > 0 {
+		fmt.Fprintf(&tb, "Uptime: %s\n", formatUptime(s.UptimeSec))
+	}
+	if temps := formatTemps(s); temps != "" {
+		fmt.Fprintf(&tb, "%s\n", temps)
+	}
+	if s.LoadAvg[0] > 0 || s.LoadAvg[1] > 0 || s.LoadAvg[2] > 0 {
+		fmt.Fprintf(&tb, "Load: %.2f %.2f %.2f", s.LoadAvg[0], s.LoadAvg[1], s.LoadAvg[2])
+	}
+	tooltip = strings.TrimRight(tb.String(), "\n")
 
 	class = "good"
 	if s.BatteryPercent < 20 {
@@ -585,6 +603,18 @@ func (m model) View() string {
 	if s.ConnectedDevices > 0 {
 		writeRow(&content, "Devices", valueStyle, fmt.Sprintf("%d", s.ConnectedDevices))
 	}
+	if s.UptimeSec > 0 {
+		writeRow(&content, "Uptime", valueStyle, formatUptime(s.UptimeSec))
+	}
+	if temps := formatTemps(s); temps != "" {
+		// formatTemps prefixes with "Temp: "; strip it because the TUI
+		// already prints a "Temp" label column.
+		writeRow(&content, "Temp", valueStyle, strings.TrimPrefix(temps, "Temp: "))
+	}
+	if s.LoadAvg[0] > 0 || s.LoadAvg[1] > 0 || s.LoadAvg[2] > 0 {
+		writeRow(&content, "Load", valueStyle, fmt.Sprintf("%.2f %.2f %.2f",
+			s.LoadAvg[0], s.LoadAvg[1], s.LoadAvg[2]))
+	}
 
 	content.WriteByte('\n')
 	switch {
@@ -623,6 +653,41 @@ func runTUI() {
 
 func bytesToGB(b float64) float64 {
 	return b / (1024 * 1024 * 1024)
+}
+
+// formatUptime turns the router's `uptime` (float seconds) into a compact
+// human label: "45s", "12m", "3h 27m", "2d 4h". Picks the two largest
+// non-zero units so it stays readable on a one-line tooltip.
+func formatUptime(sec float64) string {
+	s := int(sec)
+	d := s / 86400
+	h := (s % 86400) / 3600
+	m := (s % 3600) / 60
+	switch {
+	case d > 0:
+		return fmt.Sprintf("%dd %dh", d, h)
+	case h > 0:
+		return fmt.Sprintf("%dh %dm", h, m)
+	case m > 0:
+		return fmt.Sprintf("%dm", m)
+	default:
+		return fmt.Sprintf("%ds", s)
+	}
+}
+
+// formatTemps renders the per-package temperatures the Mudi reports.
+// Returns empty when neither is populated (e.g. M7010, which has no
+// equivalent).
+func formatTemps(s *Status) string {
+	switch {
+	case s.CPUTempC > 0 && s.MCUTempC > 0:
+		return fmt.Sprintf("Temp: CPU %d°C  MCU %.1f°C", s.CPUTempC, s.MCUTempC)
+	case s.CPUTempC > 0:
+		return fmt.Sprintf("Temp: CPU %d°C", s.CPUTempC)
+	case s.MCUTempC > 0:
+		return fmt.Sprintf("Temp: MCU %.1f°C", s.MCUTempC)
+	}
+	return ""
 }
 
 func signalBars(strength int) string {

@@ -385,6 +385,7 @@ func applyCellular(s *Status, c cellularSnapshot) {
 				s.NetworkTypeRaw = mode
 			}
 			s.Band = jsonInt(cell, "band")
+			s.DLBandwidth = jsonStr(cell, "dl_bandwidth")
 			// rsrp/rsrq/sinr arrive as decimal strings — jsonInt would
 			// reject the sign and the decimal point.
 			s.RSRP = int(jsonFloatStr(cell, "rsrp"))
@@ -454,10 +455,24 @@ func subMap(m map[string]any, key string) map[string]any {
 func parseMudiSystem(s *Status, root map[string]any) {
 	// Battery on the Mudi 7 lives at system.mcu, not in a dedicated service.
 	// charging_status is 0 on battery, >0 when the charger is connected.
-	if sys, ok := root["system"].(map[string]any); ok {
-		if mcu, ok := sys["mcu"].(map[string]any); ok {
+	if sys := subMap(root, "system"); sys != nil {
+		if mcu := subMap(sys, "mcu"); mcu != nil {
 			s.BatteryPercent = jsonInt(mcu, "charge_percent")
 			s.BatteryCharging = jsonInt(mcu, "charging_status") > 0
+			s.MCUTempC = jsonFloatStr(mcu, "temperature")
+		}
+		if cpu := subMap(sys, "cpu"); cpu != nil {
+			s.CPUTempC = jsonInt(cpu, "temperature")
+		}
+		if v, ok := sys["uptime"].(float64); ok {
+			s.UptimeSec = v
+		}
+		if arr, ok := sys["load_average"].([]any); ok {
+			for i := 0; i < 3 && i < len(arr); i++ {
+				if f, ok := arr[i].(float64); ok {
+					s.LoadAvg[i] = f
+				}
+			}
 		}
 	}
 

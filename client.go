@@ -462,6 +462,7 @@ type Status struct {
 	NetworkType    string // short label like "5G", "4G+"
 	NetworkTypeRaw string // technical mode from the modem (e.g. "LTE FDD", "NR5G-NSA"); empty for M7010
 	Band           int
+	DLBandwidth    string // channel bandwidth label, e.g. "100MHz"; Mudi-only
 	ConnectStatus  int
 	SignalStrength int // 0-5; firmware reports 0, we derive from RSRP
 	RSRP           int // dBm
@@ -472,6 +473,12 @@ type Status struct {
 
 	BatteryPercent  int
 	BatteryCharging bool
+
+	// Mudi-only host metrics (populated from system.get_status.system).
+	UptimeSec  float64
+	CPUTempC   int
+	MCUTempC   float64
+	LoadAvg    [3]float64 // 1m / 5m / 15m
 
 	TxSpeed string
 	RxSpeed string
