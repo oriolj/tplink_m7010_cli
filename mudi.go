@@ -1,26 +1,21 @@
 package main
 
-// GL.iNet Mudi (GL-E5800) JSON-RPC client.
+// GL.iNet Mudi (GL-E5800) client.
 //
-// Wire format is nothing like the M7010's AES+RSA envelope. The Mudi
-// (firmware 4.x, based on OpenWrt 22.03) exposes a JSON-RPC endpoint at
-// /rpc with two phases:
+// Two transports in one file:
 //
-//  1. POST {"method":"challenge","params":{"username":"root"}}
-//     → {salt, nonce, alg:5, hash-method:"sha256"}
+//   - /rpc — JSON-RPC for system / clients / qos / network. Auth is
+//     challenge → sha256-crypt → sha256(user:cryptHash:nonce) → sid.
+//     The sid then rides on every authenticated call as params[0].
 //
-//  2. cryptHash = sha256-crypt(password, salt)   (the $5$salt$… string)
-//     loginHash = sha256(username + ":" + cryptHash + ":" + nonce)
-//     POST {"method":"login","params":{"username":"root","hash":loginHash}}
-//     → {sid, username}
+//   - /ws — WebSocket that pushes named cellular events (operator,
+//     signal, traffic, dial state). The home-screen tile reads from
+//     here and there is no equivalent /rpc method on the Mudi 7's
+//     CPU-integrated 5G modem.
 //
-//  3. Authenticated calls go through the generic "call" method with
-//     params=[sid, service, method, args]. args MUST be an array — a JSON
-//     object (`{}`) is rejected with "Invalid params" even when the method
-//     takes no arguments, because the GL server position-parses params.
-//
-// See PROTOCOL_GLINET.md for the full picture and the rationale behind
-// the field choices in parseMudi* below.
+// See PROTOCOL_GLINET.md for the full wire format, the JSON-RPC error
+// codes, the WS event schema, and the open question of how the browser
+// kicks the WS server into pushing.
 
 import (
 	"bytes"
@@ -31,12 +26,21 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"time"
 )
 
 const (
 	mudiDefaultAddr = "192.168.8.1"
 	mudiUsername    = "root" // GL.iNet UI logs in as root
 	mudiRPCPath     = "/rpc"
+	mudiWSPath      = "/ws?sid=" // sid is appended
+
+	// mudiWSCollectTimeout bounds how long Fetch waits for the cellular
+	// signal/SIM/traffic stream. Server pushes events every ~10s; we
+	// usually see the first batch within ~50ms of connecting because nginx
+	// is pre-warmed. 2s is a safe cap before we give up and ship whatever
+	// we got.
+	mudiWSCollectTimeout = 2 * time.Second
 )
 
 type MudiClient struct {
@@ -183,14 +187,18 @@ func (m *MudiClient) Reboot() error {
 	return nil
 }
 
-// Fetch pulls the home-screen status (system + modem + clients) into a
-// Status struct shared with the M7010 path. The two RPCs are independent,
-// so they run in parallel — halves wall-clock per tick.
+// Fetch pulls system state via /rpc and cellular state via the /ws
+// event stream, in parallel. The Mudi 7's CPU-integrated 5G modem is not
+// exposed under modem.get_modems_info — its signal, operator, and
+// traffic counters only show up on the WebSocket (see PROTOCOL_GLINET.md
+// for the schema and the discovery story).
 func (m *MudiClient) Fetch() (*Status, error) {
 	var (
-		sysRaw, modemRaw any
-		sysErr, modemErr error
-		wg               sync.WaitGroup
+		sysRaw   any
+		sysErr   error
+		cellular cellularSnapshot
+		wsErr    error
+		wg       sync.WaitGroup
 	)
 	wg.Add(2)
 	go func() {
@@ -199,7 +207,7 @@ func (m *MudiClient) Fetch() (*Status, error) {
 	}()
 	go func() {
 		defer wg.Done()
-		modemRaw, modemErr = m.callSvc("modem", "get_modems_info", nil)
+		cellular, wsErr = m.collectCellular(mudiWSCollectTimeout)
 	}()
 	wg.Wait()
 
@@ -214,18 +222,169 @@ func (m *MudiClient) Fetch() (*Status, error) {
 	s := &Status{Model: m.Name(), RawStatus: sysMap}
 	parseMudiSystem(s, sysMap)
 
-	// modem.get_modems_info returns [] when no SIM is active. We still
-	// have NetworkType from system.network[]; we just lose RSRP/operator.
-	if modemErr == nil {
-		s.RawFlowStat = map[string]any{"modems": modemRaw}
-		if list, ok := modemRaw.([]any); ok && len(list) > 0 {
-			if first, ok := list[0].(map[string]any); ok {
-				parseMudiModem(s, first)
+	if wsErr == nil {
+		s.RawFlowStat = cellular.raw
+		applyCellular(s, cellular)
+	}
+	// wsErr is non-fatal: battery + connectivity from system.get_status
+	// already populated. The widget will just show empty signal fields.
+
+	return s, nil
+}
+
+// cellularSnapshot is whatever we managed to collect from the WebSocket
+// before the timeout fired. Any field can be empty/nil.
+type cellularSnapshot struct {
+	simsStatus     []map[string]any // cellular.sims_status
+	networksInfo   []map[string]any // cellular.networks_info
+	networksStatus []map[string]any // cellular.networks_status
+	simsInfo       []map[string]any // cellular.sims_info
+	raw            map[string]any   // everything we saw, for --raw mode
+}
+
+// collectCellular opens the Mudi's event stream and reads until either
+// every event type we care about has arrived or the timeout fires.
+func (m *MudiClient) collectCellular(timeout time.Duration) (cellularSnapshot, error) {
+	var snap cellularSnapshot
+	if m.sid == "" {
+		return snap, fmt.Errorf("not logged in")
+	}
+	ws, err := dialWS(m.addr, mudiWSPath+m.sid, "Admin-Token="+m.sid, timeout)
+	if err != nil {
+		return snap, err
+	}
+	defer ws.close()
+
+	snap.raw = map[string]any{}
+	deadline := time.Now().Add(timeout)
+	ws.c.SetReadDeadline(deadline)
+
+	for {
+		msg, err := ws.readMessage()
+		if err != nil {
+			// EOF or read timeout — return what we have.
+			break
+		}
+		var ev struct {
+			Name string         `json:"name"`
+			Data map[string]any `json:"data"`
+		}
+		if json.Unmarshal(msg, &ev) != nil {
+			continue
+		}
+		m.debugf("ws %s\n", ev.Name)
+		snap.raw[ev.Name] = ev.Data
+		switch ev.Name {
+		case "cellular.sims_status":
+			snap.simsStatus = mapList(ev.Data["sims"])
+		case "cellular.sims_info":
+			snap.simsInfo = mapList(ev.Data["sims"])
+		case "cellular.networks_info":
+			snap.networksInfo = mapList(ev.Data["networks"])
+		case "cellular.networks_status":
+			snap.networksStatus = mapList(ev.Data["networks"])
+		}
+		if snap.simsStatus != nil && snap.networksInfo != nil && snap.networksStatus != nil {
+			break // got a full picture; stop early
+		}
+	}
+	return snap, nil
+}
+
+// mapList unwraps a JSON array-of-objects.
+func mapList(v any) []map[string]any {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(arr))
+	for _, e := range arr {
+		if m, ok := e.(map[string]any); ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// applyCellular maps the WebSocket-derived snapshot onto the Status
+// struct shared with the M7010 path. We pick the SIM that's actually
+// dialled — `dial_status: 0` (success) — and use its slot to match up
+// the other event types.
+func applyCellular(s *Status, c cellularSnapshot) {
+	activeSlot := pickActiveSlot(c)
+	if activeSlot == "" {
+		return
+	}
+	if ss := findBySlot(c.simsStatus, activeSlot); ss != nil {
+		// strength is 0-4; map to our 0-5 scale by adding 1 when present.
+		if v := jsonInt(ss, "strength"); v > 0 {
+			s.SignalStrength = v + 1
+		}
+		if op := jsonStr(ss, "carrier"); op != "" {
+			s.Operator = op
+		}
+	}
+	if ni := findBySlot(c.networksInfo, activeSlot); ni != nil {
+		if ipv4, ok := ni["ipv4"].(map[string]any); ok {
+			if ip := jsonStr(ipv4, "ip"); ip != "" {
+				s.WanIP = ip
+			}
+		}
+		if cell, ok := ni["cell_info"].(map[string]any); ok {
+			if mode := jsonStr(cell, "mode"); mode != "" {
+				s.NetworkType = mode // "NR5G-NSA", "LTE", etc.
+			}
+			s.Band = jsonInt(cell, "band")
+			// rsrp/rsrq/sinr come as decimal strings — reuse jsonFloatStr,
+			// then truncate to int for the existing dBm display.
+			s.RSRP = int(jsonFloatStr(cell, "rsrp"))
+			s.RSRQ = int(jsonFloatStr(cell, "rsrq"))
+			s.SNR = int(jsonFloatStr(cell, "sinr"))
+			// rsrp_level (0-4) is the same scale as sims_status.strength.
+			// If sims_status didn't fire yet, fall back to it.
+			if s.SignalStrength == 0 {
+				if lvl := jsonInt(cell, "rsrp_level"); lvl > 0 {
+					s.SignalStrength = lvl + 1
+				}
 			}
 		}
 	}
+	if ns := findBySlot(c.networksStatus, activeSlot); ns != nil {
+		s.TotalBytes = jsonFloatStr(ns, "traffic_total")
+	}
+	if s.SignalStrength == 0 && s.RSRP != 0 {
+		s.SignalStrength = rsrpToSignal(s.RSRP)
+	}
+}
 
-	return s, nil
+// pickActiveSlot returns the slot ("1" / "2") whose dial succeeded
+// (dial_status == 0). Falls back to the first slot with any data.
+func pickActiveSlot(c cellularSnapshot) string {
+	for _, n := range c.networksStatus {
+		if jsonInt(n, "dial_status") == 0 && jsonStr(n, "slot") != "" {
+			return jsonStr(n, "slot")
+		}
+	}
+	for _, n := range c.networksStatus {
+		if slot := jsonStr(n, "slot"); slot != "" {
+			return slot
+		}
+	}
+	for _, s := range c.simsStatus {
+		if slot := jsonStr(s, "slot"); slot != "" {
+			return slot
+		}
+	}
+	return ""
+}
+
+func findBySlot(list []map[string]any, slot string) map[string]any {
+	for _, m := range list {
+		if jsonStr(m, "slot") == slot {
+			return m
+		}
+	}
+	return nil
 }
 
 func parseMudiSystem(s *Status, root map[string]any) {
@@ -273,65 +432,4 @@ func parseMudiSystem(s *Status, root map[string]any) {
 				jsonInt(c0, "usbeth_total")
 		}
 	}
-}
-
-func parseMudiModem(s *Status, mm map[string]any) {
-	// GL.iNet renames these fields across firmware revisions; add candidates
-	// when a new firmware shows up rather than swapping.
-	if op := firstStr(mm, "carrier", "operator_name", "operator", "operator_short", "network_name", "isp"); op != "" {
-		s.Operator = op
-	}
-	if nt := firstStr(mm, "network_type", "act", "network_act", "modem_act", "network_mode", "current_network"); nt != "" {
-		s.NetworkType = nt
-	}
-	s.Band = firstInt(mm, "band", "lte_band", "primary_band", "lte_band_num")
-	s.RSRP = firstInt(mm, "rsrp", "lte_rsrp")
-	s.RSRQ = firstInt(mm, "rsrq", "lte_rsrq")
-	s.RSSI = firstInt(mm, "rssi", "lte_rssi", "signal_rssi")
-	s.SNR = firstInt(mm, "sinr", "snr", "lte_sinr")
-	s.SignalStrength = firstInt(mm, "signal_bars", "signal_strength", "signal_quality", "signal_level")
-	if s.SignalStrength == 0 && s.RSRP != 0 {
-		s.SignalStrength = rsrpToSignal(s.RSRP)
-	}
-	if ip := firstStr(mm, "ipv4", "ip", "wan_ipv4", "ipaddr"); ip != "" {
-		s.WanIP = ip
-	}
-	if used := firstFloatish(mm, "total_used", "data_used", "month_used", "rx_tx_total"); used > 0 {
-		s.TotalBytes = used
-	}
-	if day := firstFloatish(mm, "day_used", "today_used", "daily_used"); day > 0 {
-		s.DailyBytes = day
-	}
-	if limit := firstFloatish(mm, "data_limit", "limit", "monthly_limit", "total_limit"); limit > 0 {
-		s.MonthLimitBytes = limit
-	}
-}
-
-// first{Str,Int,Floatish} delegate to the per-key helpers in client.go,
-// returning the first non-zero / non-empty value among keys.
-func firstStr(m map[string]any, keys ...string) string {
-	for _, k := range keys {
-		if v := jsonStr(m, k); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-func firstInt(m map[string]any, keys ...string) int {
-	for _, k := range keys {
-		if v := jsonInt(m, k); v != 0 {
-			return v
-		}
-	}
-	return 0
-}
-
-func firstFloatish(m map[string]any, keys ...string) float64 {
-	for _, k := range keys {
-		if v := jsonFloatStr(m, k); v != 0 {
-			return v
-		}
-	}
-	return 0
 }
