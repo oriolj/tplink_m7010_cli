@@ -30,6 +30,17 @@ Both devices surface the same set of metrics (where available):
 - WAN IPv4, connected device count
 - Power off + reboot
 
+The TUI adds a few things the widgets don't show:
+
+- **RSRP history sparkline** (fixed dBm scale) — watch the signal react
+  while physically repositioning the hotspot
+- **Live throughput** — reported directly by the M7010; derived from the
+  traffic-counter delta on the Mudi
+- **Data-limit gauge** and today's usage
+- **Stale-data handling** — a failed refresh keeps the last-known data on
+  screen with the error and its age in the footer, instead of blanking
+  the dashboard
+
 ## Modes
 
 | Mode       | Flag              | Output                                       |

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRsrpToSignal(t *testing.T) {
@@ -158,6 +159,66 @@ func TestJsonFloatStr(t *testing.T) {
 	}
 	if got := jsonFloatStr(m, "absent"); got != 0 {
 		t.Errorf("absent: got %v", got)
+	}
+}
+
+func TestSparkline(t *testing.T) {
+	// Fixed scale: -125 → lowest level, -75 (and better) → highest.
+	got := sparkline([]int{-125, -100, -75})
+	if got != "▁▄█" {
+		t.Errorf("sparkline = %q, want ▁▄█", got)
+	}
+	// Out-of-range values clamp instead of indexing out of bounds.
+	got = sparkline([]int{-140, -60})
+	if got != "▁█" {
+		t.Errorf("clamped sparkline = %q, want ▁█", got)
+	}
+}
+
+func TestHumanBytes(t *testing.T) {
+	cases := []struct {
+		in   float64
+		want string
+	}{
+		{512, "512 B"},
+		{42.7 * (1 << 20), "42.7 MB"},
+		{2964, "2.9 KB"},
+		{13.48 * (1 << 30), "13.48 GB"},
+	}
+	for _, c := range cases {
+		if got := humanBytes(c.in); got != c.want {
+			t.Errorf("humanBytes(%v) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestComputeRate(t *testing.T) {
+	t0 := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	t1 := t0.Add(10 * time.Second)
+
+	if got := computeRate(1000, 21000, t0, t1); got != 2000 {
+		t.Errorf("rate = %v, want 2000 B/s", got)
+	}
+	// No previous sample yet.
+	if got := computeRate(0, 21000, time.Time{}, t1); got != 0 {
+		t.Errorf("no prev sample: rate = %v, want 0", got)
+	}
+	// Counter reset (reboot / statistics cleared).
+	if got := computeRate(21000, 1000, t0, t1); got != 0 {
+		t.Errorf("counter reset: rate = %v, want 0", got)
+	}
+	// Same timestamp must not divide by zero.
+	if got := computeRate(1000, 2000, t0, t0); got != 0 {
+		t.Errorf("zero interval: rate = %v, want 0", got)
+	}
+}
+
+func TestGaugeBarClamps(t *testing.T) {
+	if got := gaugeBar(150); got != "[██████████]" {
+		t.Errorf("gaugeBar(150) = %q, want full bar", got)
+	}
+	if got := gaugeBar(0); got != "[░░░░░░░░░░]" {
+		t.Errorf("gaugeBar(0) = %q, want empty bar", got)
 	}
 }
 

@@ -183,17 +183,33 @@ widget just shows the RPC-derived fields.
 
 ## TUI model (Bubble Tea)
 
-Standard Elm-ish shape, identical to the original single-device path:
+Standard Elm-ish shape:
 
 - `model` holds `*SupportedDevice`, `*Status`, error, loading flag,
-  refresh interval, pending power-action state.
+  refresh interval, pending power-action state — plus the cross-tick
+  display state: an RSRP ring buffer for the sparkline, the previous
+  traffic-counter sample for throughput derivation, and the
+  last-successful-fetch timestamp for the stale indicator.
 - `Init` kicks off `fetchCmdFor(d)` plus a `tickCmd`.
-- `tickMsg` every `--refresh` seconds triggers another `fetchCmdFor`.
+- `tickMsg` every `--refresh` seconds triggers another `fetchCmdFor`
+  (skipped when a fetch is already in flight).
 - `r` re-fetches; `q/esc/ctrl+c` quits; `p`-then-`p` / `R`-then-`R`
   power-off / reboot with a two-press confirmation.
 - The TUI holds a single logged-in `Device` across ticks (in
   `tuiDevice`); on any error the device is dropped and the next tick
   reconnects.
+- **Errors don't blank the dashboard**: once a fetch has succeeded, a
+  failing tick keeps the last-known data on screen and reports the
+  error plus its age in the footer ("showing data from 40s ago").
+- **Signal history**: RSRP samples render as a sparkline on a fixed
+  -125…-75 dBm scale (same span as `rsrpToSignal`), so the shape is
+  comparable across sessions — useful when physically repositioning
+  the hotspot.
+- **Throughput**: the M7010 reports split rx/tx speeds directly; the
+  Mudi only exposes a total-traffic counter, so `computeRate` derives
+  a combined rate from the per-tick delta (0 on counter resets).
+- Colors are `lipgloss.AdaptiveColor` pairs, so the dashboard is
+  legible on light terminals too.
 
 ## Waybar / noctalia output
 

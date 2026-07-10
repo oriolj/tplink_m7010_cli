@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -348,9 +349,22 @@ type model struct {
 	loading bool
 	refresh time.Duration
 
+	lastUpdate time.Time // when status last refreshed successfully
+	rsrpHist   []int     // recent RSRP samples for the sparkline
+
+	// Cross-tick state for deriving throughput on devices that don't
+	// report live speeds (the Mudi only exposes a total-bytes counter).
+	prevTotalBytes float64
+	prevSampleTime time.Time
+	derivedRate    float64 // bytes/sec over the last tick interval
+
 	pendingAction powerAction // "" when no action armed
 	actionResult  string
 }
+
+// rsrpHistMax caps the sparkline history to what fits in the box next to
+// the 14-column label.
+const rsrpHistMax = 28
 
 type statusMsg struct {
 	status *Status
@@ -421,9 +435,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case statusMsg:
 		m.loading = false
-		m.status = msg.status
-		m.err = msg.err
 		m.actionResult = ""
+		if msg.err != nil {
+			// Keep the last-known status visible; View marks it stale.
+			m.err = msg.err
+			return m, nil
+		}
+		m.err = nil
+		m.status = msg.status
+		now := time.Now()
+		m.lastUpdate = now
+		if s := msg.status; s != nil {
+			if s.RSRP != 0 {
+				m.rsrpHist = append(m.rsrpHist, s.RSRP)
+				if len(m.rsrpHist) > rsrpHistMax {
+					m.rsrpHist = m.rsrpHist[len(m.rsrpHist)-rsrpHistMax:]
+				}
+			}
+			if s.TotalBytes > 0 {
+				m.derivedRate = computeRate(m.prevTotalBytes, s.TotalBytes, m.prevSampleTime, now)
+				m.prevTotalBytes = s.TotalBytes
+				m.prevSampleTime = now
+			}
+		}
 	case tickMsg:
 		// If the previous fetch is still in flight, don't queue another
 		// behind the device mutex — just reschedule the tick.
@@ -483,30 +517,32 @@ func actionCmdFor(d *SupportedDevice, action powerAction) tea.Cmd {
 	}
 }
 
+// Colors are adaptive: the old hardcoded palette assumed a dark terminal
+// (white value text is invisible on a light background).
 var (
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#00d4aa")).
+			Foreground(lipgloss.AdaptiveColor{Light: "#008a6c", Dark: "#00d4aa"}).
 			MarginBottom(1)
 
 	boxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#555")).
+			BorderForeground(lipgloss.AdaptiveColor{Light: "#aaaaaa", Dark: "#555555"}).
 			Padding(1, 2).
 			Width(46)
 
 	labelStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#888")).
+			Foreground(lipgloss.AdaptiveColor{Light: "#666666", Dark: "#888888"}).
 			Width(14)
 
 	valueStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#fff"))
+			Foreground(lipgloss.AdaptiveColor{Light: "#111111", Dark: "#ffffff"})
 
-	goodStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00d4aa"))
-	warnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffaa00"))
-	critStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff4444"))
-	dimStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#555"))
+	goodStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#008a6c", Dark: "#00d4aa"})
+	warnStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#a86e00", Dark: "#ffaa00"})
+	critStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#c41e1e", Dark: "#ff4444"})
+	dimStyle  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#999999", Dark: "#555555"})
 )
 
 func writeRow(b *strings.Builder, label string, valStyle lipgloss.Style, value string) {
@@ -520,15 +556,16 @@ func (m model) View() string {
 	content.WriteString(titleStyle.Render(m.device.Title))
 	content.WriteByte('\n')
 
-	if m.err != nil {
-		content.WriteString(critStyle.Render("Error: " + m.err.Error()))
-		content.WriteString("\n\n")
-		content.WriteString(dimStyle.Render("r = retry  q = quit"))
-		return boxStyle.Render(content.String())
-	}
-
+	// A full-screen error only when we never had data; once a fetch has
+	// succeeded, errors show in the footer under the stale dashboard.
 	if m.status == nil {
-		content.WriteString(dimStyle.Render("Connecting..."))
+		if m.err != nil {
+			content.WriteString(critStyle.Render("Error: " + m.err.Error()))
+			content.WriteString("\n\n")
+			content.WriteString(dimStyle.Render("r = retry  q = quit"))
+		} else {
+			content.WriteString(dimStyle.Render("Connecting..."))
+		}
 		return boxStyle.Render(content.String())
 	}
 
@@ -554,7 +591,11 @@ func (m model) View() string {
 	}
 	writeRow(&content, "Signal", sigStyle, fmt.Sprintf("%s  %d/5", bars, s.SignalStrength))
 
-	batBar := batteryBar(s.BatteryPercent)
+	if len(m.rsrpHist) >= 2 {
+		writeRow(&content, "History", sigStyle, sparkline(m.rsrpHist))
+	}
+
+	batBar := gaugeBar(s.BatteryPercent)
 	batStyle := goodStyle
 	switch {
 	case s.BatteryPercent < 20:
@@ -572,17 +613,36 @@ func (m model) View() string {
 	limitGB := bytesToGB(s.MonthLimitBytes)
 	dataStr := fmt.Sprintf("%.2f GB", dataGB)
 	dataStyle := valueStyle
+	dataPct := -1.0
 	if limitGB > 0 {
-		pct := (dataGB / limitGB) * 100
-		dataStr = fmt.Sprintf("%.2f / %.0f GB (%.0f%%)", dataGB, limitGB, pct)
+		dataPct = (dataGB / limitGB) * 100
+		dataStr = fmt.Sprintf("%.2f / %.0f GB (%.0f%%)", dataGB, limitGB, dataPct)
 		switch {
-		case pct > 90:
+		case dataPct > 90:
 			dataStyle = critStyle
-		case pct > 70:
+		case dataPct > 70:
 			dataStyle = warnStyle
 		}
 	}
 	writeRow(&content, "Data Used", dataStyle, dataStr)
+	if dataPct >= 0 {
+		writeRow(&content, "", dataStyle, gaugeBar(int(dataPct)))
+	}
+	if s.DailyBytes > 0 {
+		writeRow(&content, "Today", valueStyle, humanBytes(s.DailyBytes))
+	}
+
+	// Live throughput: the M7010 reports split speeds directly; on the
+	// Mudi we derive a combined rate from the traffic counter delta.
+	rx := parseSpeed(s.RxSpeed)
+	tx := parseSpeed(s.TxSpeed)
+	switch {
+	case rx > 0 || tx > 0:
+		writeRow(&content, "Speed", valueStyle,
+			fmt.Sprintf("↓ %s  ↑ %s", humanRate(rx), humanRate(tx)))
+	case m.derivedRate > 0:
+		writeRow(&content, "Speed", valueStyle, "≈ "+humanRate(m.derivedRate))
+	}
 
 	if s.Operator != "" {
 		opStr := s.Operator
@@ -620,6 +680,12 @@ func (m model) View() string {
 		content.WriteString(warnStyle.Render("Press R again to REBOOT, any other key to cancel"))
 	case m.actionResult != "":
 		content.WriteString(goodStyle.Render(m.actionResult))
+	case m.err != nil:
+		ago := time.Since(m.lastUpdate).Round(time.Second)
+		content.WriteString(critStyle.Render("Error: " + m.err.Error()))
+		content.WriteByte('\n')
+		content.WriteString(dimStyle.Render(
+			fmt.Sprintf("showing data from %s ago — r retry  q quit", ago)))
 	default:
 		footer := "r refresh  w web UI  p poweroff  R reboot  q quit"
 		if m.loading {
@@ -699,8 +765,13 @@ func signalBars(strength int) string {
 	return b.String()
 }
 
-func batteryBar(pct int) string {
+// gaugeBar renders a 0-100 percentage as a 10-slot bar. Used for the
+// battery and the monthly data limit.
+func gaugeBar(pct int) string {
 	filled := pct / 10
+	if filled > 10 {
+		filled = 10
+	}
 	var b strings.Builder
 	b.WriteByte('[')
 	for i := 0; i < 10; i++ {
@@ -712,4 +783,59 @@ func batteryBar(pct int) string {
 	}
 	b.WriteByte(']')
 	return b.String()
+}
+
+// sparkline renders RSRP samples on a fixed -125…-75 dBm scale (the same
+// span rsrpToSignal maps to 0-5 bars), so the shape is comparable across
+// sessions rather than auto-scaled to whatever range the buffer holds.
+func sparkline(hist []int) string {
+	const lo, hi = -125, -75
+	levels := []rune("▁▂▃▄▅▆▇█")
+	var b strings.Builder
+	for _, v := range hist {
+		idx := (v - lo) * (len(levels) - 1) / (hi - lo)
+		if idx < 0 {
+			idx = 0
+		}
+		if idx > len(levels)-1 {
+			idx = len(levels) - 1
+		}
+		b.WriteRune(levels[idx])
+	}
+	return b.String()
+}
+
+// humanBytes formats a byte count with a unit that keeps 2-4 significant
+// digits: "512 B", "42.7 MB", "13.48 GB".
+func humanBytes(b float64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.2f GB", b/(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1f MB", b/(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.1f KB", b/(1<<10))
+	default:
+		return fmt.Sprintf("%.0f B", b)
+	}
+}
+
+func humanRate(bytesPerSec float64) string {
+	return humanBytes(bytesPerSec) + "/s"
+}
+
+// parseSpeed reads the M7010's txSpeed/rxSpeed decimal strings (bytes/s).
+func parseSpeed(s string) float64 {
+	f, _ := strconv.ParseFloat(s, 64)
+	return f
+}
+
+// computeRate derives bytes/sec from two samples of a monotonic traffic
+// counter. Returns 0 when there's no previous sample or the counter went
+// backwards (reboot / statistics reset).
+func computeRate(prevBytes, curBytes float64, prevTime, curTime time.Time) float64 {
+	if prevTime.IsZero() || !curTime.After(prevTime) || curBytes < prevBytes {
+		return 0
+	}
+	return (curBytes - prevBytes) / curTime.Sub(prevTime).Seconds()
 }
