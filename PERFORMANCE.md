@@ -96,6 +96,12 @@ output. The noctalia widget collapses silently.
 | Explicit `--device m7010` and M7010 absent  | **~5030 ms** |
 | Explicit `--device mudi --addr <unreach>`   | **~5030 ms** |
 
+> Note: these numbers were measured before autodetect gained the
+> protocol-confirmation probe. The probe adds one unauthenticated HTTP
+> round-trip (~5 ms on the LAN) to the reachable cases; the
+> unreachable case is unchanged (~500 ms, still bounded by the same
+> detect timeout).
+
 The 5 s case is the full `defaultTimeout` in `client.go` — when the
 user pins the device explicitly, autodetect is skipped and we try to
 log in directly. If the address is dead, the HTTP login dies on the

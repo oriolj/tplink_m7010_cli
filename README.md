@@ -12,9 +12,12 @@ same code:
 | GL.iNet (OpenWrt)  | Mudi GL-E5800 | `192.168.8.1` | JSON-RPC with SHA-256-crypt + sid |
 
 The same binary autodetects which device is on the LAN — it prefers the
-default-gateway match (cheap, unambiguous) and falls back to a parallel TCP
-probe. If neither hotspot is reachable, widget modes emit empty JSON and exit
-quickly so the laptop battery isn't burned on doomed retries.
+default-gateway match and falls back to probing both addresses in parallel.
+Both signals are confirmed with a cheap unauthenticated **protocol probe**
+(the M7010 hello / the Mudi challenge), so a home router that happens to
+live at 192.168.0.1 is not mistaken for a hotspot. If neither hotspot is
+reachable, widget modes emit empty JSON and exit quickly so the laptop
+battery isn't burned on doomed retries.
 
 ## Features
 
@@ -94,22 +97,35 @@ make install-waybar     # drops the waybar wrapper script in ~/.config/waybar/sc
 ```
 
 Other useful targets: `make build`, `make run`, `make raw`, `make clean`,
-`make vet`, `make tidy`.
+`make test`, `make vet`, `make tidy`.
 
 ## Battery-friendly behaviour
 
-This binary is meant to run on the host laptop on every waybar tick (~5s)
-without being a battery hog. Two specific choices keep it cheap:
+This binary is meant to run on the host laptop on every waybar tick (30s
+in the shipped config) without being a battery hog. Two specific choices
+keep it cheap:
 
-- **Autodetect prefers the kernel's default gateway** over a network probe.
-  Reading `/proc/net/route` is essentially free; the TCP probe only happens
-  when the gateway doesn't match any supported device.
+- **Autodetect prefers the kernel's default gateway** over probing every
+  address. Reading `/proc/net/route` is essentially free; the parallel
+  probe only happens when the gateway doesn't match any supported device.
+  Either way the pick is confirmed with one cheap unauthenticated HTTP
+  round-trip before any login is attempted.
 - **Widget modes exit silently when no router is reachable.** No login
   attempts, no 5-second timeouts, no retries. Empty JSON makes waybar /
   noctalia hide the module.
 
 If you also want to skip autodetect entirely (e.g. you only ever use one
 router), pass `--device m7010` or `--device mudi` from your waybar wrapper.
+
+Two related notes:
+
+- **Address overrides via env** (`M7010_ADDR` / `MUDI_ADDR` / `TPLINK_ADDR`
+  / `GLINET_ADDR`) are honoured by autodetect too — the gateway match and
+  the probe both use the resolved address, not just the factory default.
+- **Widget modes don't log out** (saves a round-trip per tick; the router
+  ages sessions out on its own). On the M7010, which allows one active web
+  session at a time, this can keep the browser UI locked out until the
+  token expires — log in from the TUI or wait a minute if that bites.
 
 ## Waybar integration
 
@@ -145,7 +161,10 @@ specific landmines.
 - `device.go`   — `Device` interface, supported-device registry, autodetect
 - `client.go`   — TP-Link M7010 client (AES-128-CBC + RSA-PKCS1v15)
 - `mudi.go`     — GL.iNet Mudi (GL-E5800) JSON-RPC client
+- `ws.go`       — Minimal WebSocket client for the Mudi's `/ws` event stream
 - `crypt.go`    — Pure-Go SHA-256 crypt(3) for the GL.iNet challenge/response
-- `Makefile`    — build, install, waybar integration
+- `*_test.go`   — Unit tests: pure helpers, WS frames, probes, and full
+  fake-device envelope tests for both protocols (`make test`)
+- `Makefile`    — build, install, test, waybar integration
 - `contrib/mifi.sh`     — Waybar wrapper (one-line exec, autodetect is in the binary)
 - `contrib/mifi-tui.sh` — Opens the TUI in a terminal (waybar tile click)

@@ -3,12 +3,15 @@ package main
 // Device abstracts over the supported routers (TP-Link M7010 AES+RSA
 // envelope, GL.iNet Mudi GL-E5800 OpenWrt JSON-RPC). Discovery is
 // opportunistic: prefer the kernel's default gateway, then a parallel
-// TCP probe. Widget modes that can't reach anything emit empty JSON
-// rather than burning power on doomed logins.
+// probe. Both paths confirm with a cheap unauthenticated protocol probe
+// — a bare TCP dial isn't enough, because both default IPs are common
+// home-router addresses. Widget modes that can't reach anything emit
+// empty JSON rather than burning power on doomed logins.
 
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -36,6 +39,9 @@ type SupportedDevice struct {
 	PasswordEnvs []string
 	PasswordPath string // path under $XDG_CONFIG_HOME
 	New          func(addr string, debug bool) Device
+	// Probe cheaply confirms addr speaks this device's protocol (an
+	// unauthenticated hello/challenge). Used by autodetect only.
+	Probe func(addr string, timeout time.Duration) bool
 }
 
 var supportedDevices = []SupportedDevice{
@@ -49,6 +55,7 @@ var supportedDevices = []SupportedDevice{
 		New: func(addr string, debug bool) Device {
 			return NewClient(addr, debug)
 		},
+		Probe: probeM7010,
 	},
 	{
 		ID:           "mudi",
@@ -60,6 +67,7 @@ var supportedDevices = []SupportedDevice{
 		New: func(addr string, debug bool) Device {
 			return NewMudiClient(addr, debug)
 		},
+		Probe: probeMudi,
 	},
 }
 
@@ -100,13 +108,20 @@ func resolvePassword(d *SupportedDevice, flagPass string) string {
 }
 
 func readPasswordFileAt(rel string) string {
-	data, err := os.ReadFile(filepath.Join(xdgConfigDir(), rel))
+	dir := xdgConfigDir()
+	if dir == "" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(dir, rel))
 	if err != nil {
 		return ""
 	}
 	return strings.TrimRight(string(data), "\r\n")
 }
 
+// xdgConfigDir returns the config root, or "" when it can't be resolved
+// ($HOME unset). Callers must not build paths from an empty root — a
+// literal "~" would never be expanded by os.ReadFile.
 func xdgConfigDir() string {
 	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
 		return v
@@ -114,38 +129,49 @@ func xdgConfigDir() string {
 	if home, err := os.UserHomeDir(); err == nil {
 		return filepath.Join(home, ".config")
 	}
+	return ""
+}
+
+// configDirDisplay is xdgConfigDir for human-facing messages only.
+func configDirDisplay() string {
+	if d := xdgConfigDir(); d != "" {
+		return d
+	}
 	return "~/.config"
 }
 
 // detectDevice tries two cheap signals, in order:
 //
 //  1. The kernel's default gateway. If we're already routing through a
-//     known device's IP that's almost certainly the device we want.
-//  2. Parallel TCP probe of every supported address, short timeout.
+//     known device's address (env overrides included), that's almost
+//     certainly the device we want — but we still confirm with the
+//     protocol probe, because 192.168.0.1 is also the most common home
+//     router gateway in existence and a false match would leave the
+//     widget showing a login error instead of collapsing.
+//  2. Parallel protocol probe of every supported address, short timeout.
+//     Protocol-level (not bare TCP) because upstream NAT and home routers
+//     happily accept TCP on port 80 without being either device.
 //
 // Returns nil if nothing answers — callers in widget modes should emit
 // empty output rather than burning power on a doomed login.
-//
-// Gateway-first matters: 192.168.0.1 is often accepted (pointing at
-// nothing useful) through upstream NAT, and a raw TCP probe will pick
-// the wrong device. The gateway signal is unambiguous because that's
-// literally where our packets go.
 func detectDevice(timeout time.Duration) *SupportedDevice {
 	if gw := defaultGateway(); gw != "" {
-		for i, d := range supportedDevices {
-			if d.DefaultAddr == gw {
-				return &supportedDevices[i]
+		for i := range supportedDevices {
+			d := &supportedDevices[i]
+			if resolveAddr(d, "") == gw && d.Probe(gw, timeout) {
+				return d
 			}
 		}
 	}
 	results := make([]bool, len(supportedDevices))
 	var wg sync.WaitGroup
-	for i, d := range supportedDevices {
+	for i := range supportedDevices {
+		d := &supportedDevices[i]
 		wg.Add(1)
-		go func(i int, addr string) {
+		go func(i int, d *SupportedDevice) {
 			defer wg.Done()
-			results[i] = reachable(addr, timeout)
-		}(i, d.DefaultAddr)
+			results[i] = d.Probe(resolveAddr(d, ""), timeout)
+		}(i, d)
 	}
 	wg.Wait()
 	for i, ok := range results {
@@ -164,7 +190,13 @@ func defaultGateway() string {
 		return ""
 	}
 	defer f.Close()
-	scanner := bufio.NewScanner(f)
+	return parseDefaultGateway(f)
+}
+
+// parseDefaultGateway extracts the default route's gateway from
+// /proc/net/route-formatted content. Split out for testability.
+func parseDefaultGateway(r io.Reader) string {
+	scanner := bufio.NewScanner(r)
 	scanner.Scan() // header
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
@@ -194,7 +226,7 @@ func openDevice(d *SupportedDevice, flagAddr, flagPass string, debug bool) (Devi
 	pass := resolvePassword(d, flagPass)
 	if pass == "" {
 		return nil, fmt.Errorf("no password for %s (try env %s or %s/%s)",
-			d.Title, d.PasswordEnvs[0], xdgConfigDir(), d.PasswordPath)
+			d.Title, d.PasswordEnvs[0], configDirDisplay(), d.PasswordPath)
 	}
 	dev := d.New(addr, debug)
 	if err := dev.Connect(pass); err != nil {

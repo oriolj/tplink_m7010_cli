@@ -8,7 +8,7 @@
 | `~/.config/tplink-m7010/password`        | M7010 admin password, one line              | 600   |
 | `~/.config/gl-e5800/password`            | Mudi (GL-E5800) admin password, one line    | 600   |
 | `~/.config/waybar/scripts/mifi.sh`       | Wrapper used by the module                  | 755   |
-| `~/.config/waybar/scripts/mifi-tui.sh`   | on-click handler — opens TUI in `$TPLINK_TERM` (default `ghostty`) | 755 |
+| `~/.config/waybar/scripts/mifi-tui.sh`   | on-click handler — opens TUI in `$TPLINK_TERM` (default `ghostty`); no password handling, the binary resolves its own | 755 |
 
 You only need whichever password file matches the device(s) you actually
 use. The binary autodetects which router is on the LAN — preferring the
@@ -57,7 +57,9 @@ pkill -SIGUSR2 waybar     # waybar reloads config on SIGUSR2
   `~/.local/bin/tplink-m7010 --waybar`. An empty JSON object means
   autodetect didn't find a supported router. Check `ip route show default`
   — autodetect prefers a default gateway that matches a known device IP
-  (`192.168.0.1` for M7010, `192.168.8.1` for Mudi).
+  (`192.168.0.1` for M7010, `192.168.8.1` for Mudi) and then confirms
+  the device actually speaks the expected protocol with one
+  unauthenticated HTTP probe.
 - **"login failed" / "Access denied"** — wrong password. For the M7010,
   `result: 1` on step 2 is `DontMatch`. Re-check the password file
   (`~/.config/tplink-m7010/password` or `~/.config/gl-e5800/password` —

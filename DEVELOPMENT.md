@@ -61,7 +61,8 @@ First real status response surprised us:
 - `battery: {voltage: 93}` — "voltage" is the percentage. Confirmed by
   watching it drop while unplugged.
 - `wan.totalStatistics: "14473800628.000000"` — bytes as a decimal string,
-  not MB. Same shape for `dailyStatistics`. Added `parseFloatStr`.
+  not MB. Same shape for `dailyStatistics`. Added a string-tolerant float
+  parser (today's `jsonFloatStr`).
 - `wan.networkType: 3` — numeric enum, not "4G". Mapped manually.
 
 ## Attempt 4 — waybar tile that doesn't haunt the bar when disconnected
@@ -86,7 +87,8 @@ about reachability, the bash wrapper handles UX.
 - **Monitoring SMS / reboot / WLAN.** All supported by the API (see
   `PROTOCOL.md` module table), just not needed for the waybar use case.
 - **A recorded-response test harness.** Would make the crypto code
-  regression-testable without a device. Deferred.
+  regression-testable without a device. Deferred at the time — done in
+  Attempt 9 as live fake-device servers instead of recordings.
 
 ## Attempt 5 — adding the GL.iNet Mudi (GL-E5800)
 
@@ -123,7 +125,7 @@ unambiguous because it's literally where our packets are going.
 ## Attempt 7 — running the same binary against two devices
 
 The `Device` interface in `device.go` is intentionally tiny (Connect,
-Fetch, Shutdown, Reboot, Close, Name, Addr). Sharing the `Status`
+Fetch, Shutdown, Reboot, Close, Name). Sharing the `Status`
 struct between protocols meant the TUI / waybar / noctalia output
 formatters didn't need a single change — every protocol-specific
 field-name guess lives inside the per-device client.
@@ -134,3 +136,56 @@ per-device env vars (`M7010_PASS` / `MUDI_PASS`) and password files
 discovered from one place. `TPLINK_PASS` / `TPLINK_ADDR` / `GLINET_PASS`
 are accepted as alternate spellings — none is preferred, neither file
 path is preferred. Both devices are first-class.
+
+## Attempt 8 — review hardening: protocol probes, RFC-clean WS, unit tests
+
+A full code review (July 2026) turned up a batch of small-but-real
+issues, fixed together:
+
+- **Autodetect probed TCP, not the protocol.** 192.168.0.1 is the most
+  common home-router gateway IP in existence, so the gateway-first match
+  from Attempt 6 could still claim an M7010 on any such LAN and leave
+  waybar showing a login-error tile instead of collapsing. Each registry
+  entry now carries a `Probe` (unauthenticated M7010 hello / Mudi
+  challenge) and both detect signals must pass it. The probes also honour
+  the `*_ADDR` env overrides via `resolveAddr`.
+- **The WS pong reply was unmasked and didn't echo the ping payload** —
+  both RFC 6455 violations a strict server answers by dropping the
+  connection. All client frames now go through one masked `sendFrame`.
+  Frame payload lengths are capped at 1MB so a corrupt length field
+  can't trigger a giant allocation.
+- **`rebootAction` swallowed every error**, including "couldn't even
+  build the request". It now returns pre-send failures and only swallows
+  the expected mid-request connection drop.
+- **A malformed step-1 response could hang the M7010 client**: an
+  unparseable RSA modulus left `chunkSize` negative and the chunking
+  loop ran backwards forever. Both `SetString` results are now checked.
+- **The Makefile's `SRC` list had drifted** (missing `ws.go`), so edits
+  to it didn't trigger rebuilds. Now `$(wildcard *.go)`.
+- **Unit tests exist now** (`make test`): openssl-verified `sha256Crypt`
+  vectors, the pure helpers, the WS frame parser against byte fixtures,
+  and the probes against `httptest` servers.
+
+## Attempt 9 — fake-device envelope tests
+
+The crypto envelopes were the last untested code, and "record/replay"
+(deferred in the early list above) turned out to be the wrong shape —
+the M7010's envelope is nondeterministic (random AES key/iv per login),
+so recordings can't be replayed byte-for-byte. Implementing the *server*
+side of each protocol in `httptest` works better:
+
+- `m7010_envelope_test.go` hands out a fixed 512-bit RSA key, decrypts
+  the client's chunked PKCS1v15 sign string with `math/big`, and
+  position-parses it exactly like the firmware — the `key,iv,h,s` order
+  from Attempt 2 is now enforced by a test instead of by memory. It also
+  validates PKCS#7 padding byte-for-byte (stricter than the client's own
+  unpad, so a symmetric client bug can't cancel out) and serves the
+  canned status/flowstat bodies from PROTOCOL.md.
+- `mudi_envelope_test.go` verifies the challenge hash with the same
+  `sha256Crypt` the device would use, rejects object-shaped `args` with
+  `-32602` (the Attempt 5 landmine), and hijacks the HTTP connection to
+  run a real WS handshake + event push through `ws.go`.
+
+One latent bug surfaced while wiring this up: `dialWS` hardcoded port
+80, so `--addr host:port` worked for `/rpc` but silently broke the WS
+path (and httptest servers). Fixed to honour an explicit port.

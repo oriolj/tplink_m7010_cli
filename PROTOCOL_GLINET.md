@@ -199,7 +199,6 @@ modem isn't on the USB bus, so this whole branch doesn't apply.
     "flash_free":2910171136,
     "flash_app":6119424,
     "load_average":[1.36,1.39,0.79],
-    "load_average":[1.36,1.39,0.79],
     "mode":0,
     "guest_ip":"192.168.9.1",
     "guest_netmask":"255.255.255.0",
@@ -224,11 +223,12 @@ signal{strength, rssi, rsrp, rsrq, sinr, mode}, network{ip, tx, rx, …}}]`
 per upstream api_description.
 
 On the **Mudi 7 (E5800)** with an active 5G SIM it still returns `[]` —
-see the next section. `parseMudiModem` in `mudi.go` tries several likely
-field names per metric (`carrier` / `operator_name` / `operator`,
-`network_type` / `act`, `band` / `lte_band`, etc.); when this branch
-finally fires on a USB-modem device, add candidates rather than replacing
-them when a new firmware shows up.
+see the next section. The binary no longer parses this branch (the Mudi 7
+path reads the WebSocket instead); if support for a USB-modem GL.iNet
+device is ever added, try several likely field names per metric
+(`carrier` / `operator_name` / `operator`, `network_type` / `act`,
+`band` / `lte_band`, etc.) and add candidates rather than replacing them
+when a new firmware shows up.
 
 ## Mudi 7 (GL-E5800) specifics
 
@@ -525,10 +525,11 @@ what to add to the table.
 
 #### WebSocket lifecycle
 
-`MudiClient.collectCellular` opens the WS, subscribes to every topic
-in `mudiSubscribeEvents`, reads until we have a complete picture (or
-the 2s timeout), then `defer ws.close()` sends a close frame and tears
-down the TCP socket. The server drops all subscriptions when the
+`MudiClient.collectCellular` opens the WS, subscribes to the three
+`cellular.*` topics it consumes (`evSimsStatus` / `evNetworksInfo` /
+`evNetworksStatus` in `mudi.go`), reads until we have a complete
+picture (or the 2s timeout), then `defer ws.close()` sends a close
+frame and tears down the TCP socket. The server drops all subscriptions when the
 connection closes — no explicit `unsubscribe` needed.
 
 If the router goes offline mid-fetch, `readMessage` returns EOF or

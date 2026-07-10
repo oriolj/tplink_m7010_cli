@@ -66,6 +66,37 @@ func (m *MudiClient) Name() string { return "GL.iNet Mudi (GL-E5800)" }
 
 var _ Device = (*MudiClient)(nil)
 
+// probeMudi checks whether addr speaks the GL.iNet JSON-RPC protocol by
+// issuing an unauthenticated challenge and looking for the salt + nonce.
+// A bare TCP dial is not enough — see probeM7010 for the failure mode.
+func probeMudi(addr string, timeout time.Duration) bool {
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "challenge",
+		"params":  map[string]string{"username": mudiUsername},
+	})
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Post("http://"+addr+mudiRPCPath, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return false
+	}
+	var env struct {
+		Result map[string]any `json:"result"`
+	}
+	if json.Unmarshal(data, &env) != nil {
+		return false
+	}
+	salt, _ := env.Result["salt"].(string)
+	nonce, _ := env.Result["nonce"].(string)
+	return salt != "" && nonce != ""
+}
+
 func (m *MudiClient) debugf(format string, args ...any) {
 	if m.debug {
 		fmt.Printf("[DEBUG] mudi "+format, args...)
@@ -222,7 +253,10 @@ func (m *MudiClient) Fetch() (*Status, error) {
 		return nil, fmt.Errorf("system.get_status: unexpected shape %T", sysRaw)
 	}
 
-	s := &Status{Model: m.Name(), RawStatus: sysMap}
+	// Model is left empty: filling it with the human label was misleading
+	// (the real model string lives in system.get_info, which would cost an
+	// extra RPC per tick for a field nothing displays).
+	s := &Status{RawStatus: sysMap}
 	parseMudiSystem(s, sysMap)
 
 	if wsErr == nil {

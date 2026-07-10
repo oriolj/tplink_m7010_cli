@@ -98,6 +98,37 @@ func (c *Client) Fetch() (*Status, error) {
 
 var _ Device = (*Client)(nil)
 
+// probeM7010 checks whether addr actually speaks the M7010 auth protocol,
+// not just whether something answers TCP on port 80. It sends the
+// unauthenticated step-1 hello and looks for the nonce in the response.
+// This is what protects autodetect from the fact that 192.168.0.1 is also
+// the most common home-router gateway IP on the planet.
+func probeM7010(addr string, timeout time.Duration) bool {
+	payload, _ := json.Marshal(map[string]any{
+		"module": moduleAuth,
+		"action": actionLoad,
+	})
+	reqBody, _ := json.Marshal(map[string]string{
+		"data": base64.StdEncoding.EncodeToString(payload),
+	})
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Post("http://"+addr+authPath, "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return false
+	}
+	m, err := decodeBase64JSON(data)
+	if err != nil {
+		return false
+	}
+	nonce, _ := m["nonce"].(string)
+	return nonce != ""
+}
+
 func (c *Client) debugf(format string, args ...any) {
 	if c.debug {
 		fmt.Printf("[DEBUG] "+format, args...)
@@ -170,10 +201,17 @@ func (c *Client) Login(password string) error {
 			nonce, rsaModHex, rsaPubKeyHex, nonceResp)
 	}
 
-	c.rsaMod = new(big.Int)
-	c.rsaMod.SetString(rsaModHex, 16)
-	c.rsaPubKey = new(big.Int)
-	c.rsaPubKey.SetString(rsaPubKeyHex, 16)
+	// Validate the hex here: a garbage modulus would otherwise leave keyLen
+	// at 0 and send rsaEncrypt's chunking loop backwards forever.
+	var ok bool
+	c.rsaMod, ok = new(big.Int).SetString(rsaModHex, 16)
+	if !ok || c.rsaMod.Sign() <= 0 {
+		return fmt.Errorf("invalid rsaMod %q in nonce response", rsaModHex)
+	}
+	c.rsaPubKey, ok = new(big.Int).SetString(rsaPubKeyHex, 16)
+	if !ok || c.rsaPubKey.Sign() <= 0 {
+		return fmt.Errorf("invalid rsaPubKey %q in nonce response", rsaPubKeyHex)
+	}
 
 	c.seqNum = intFrom(nonceResp["seqNum"])
 
@@ -271,14 +309,28 @@ func (c *Client) rebootAction(action int) error {
 	if c.token == "" {
 		return fmt.Errorf("not logged in")
 	}
-	// The modem often kills the connection before responding; an empty or
-	// transport-level error is the normal outcome for shutdown.
-	resp, err := c.encryptedRequest(webPath, map[string]any{
+	// Failing to even build the envelope is a real error and must not be
+	// swallowed — nothing was sent, so "command sent" would be a lie.
+	body, err := c.buildEnvelope(map[string]any{
 		"module": moduleReboot,
 		"action": action,
 		"token":  c.token,
 	})
 	if err != nil {
+		return err
+	}
+	// From here on the modem often kills the connection before responding;
+	// a transport error or an undecryptable tail is the normal outcome.
+	respData, err := c.postRaw(webPath, body)
+	if err != nil {
+		return nil
+	}
+	decrypted, err := c.aesDecrypt(strings.TrimSpace(string(respData)))
+	if err != nil {
+		return nil
+	}
+	var resp map[string]any
+	if json.Unmarshal(decrypted, &resp) != nil {
 		return nil
 	}
 	if code, ok := resp["result"].(float64); ok && code != 0 {
@@ -300,7 +352,9 @@ func (c *Client) Logout() {
 	c.token = ""
 }
 
-func (c *Client) encryptedRequest(endpoint string, payload map[string]any) (map[string]any, error) {
+// buildEnvelope AES-encrypts the payload and RSA-signs it into the
+// {data, sign} request body every post-login call uses.
+func (c *Client) buildEnvelope(payload map[string]any) ([]byte, error) {
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal payload: %w", err)
@@ -324,6 +378,14 @@ func (c *Client) encryptedRequest(endpoint string, payload map[string]any) (map[
 		"data": encryptedData,
 		"sign": sign,
 	})
+	return reqBody, nil
+}
+
+func (c *Client) encryptedRequest(endpoint string, payload map[string]any) (map[string]any, error) {
+	reqBody, err := c.buildEnvelope(payload)
+	if err != nil {
+		return nil, err
+	}
 
 	respData, err := c.postRaw(endpoint, reqBody)
 	if err != nil {
@@ -407,6 +469,9 @@ func (c *Client) rsaEncrypt(plaintext []byte) (string, error) {
 	e := c.rsaPubKey
 	keyLen := (n.BitLen() + 7) / 8
 	chunkSize := keyLen - 11
+	if chunkSize <= 0 {
+		return "", fmt.Errorf("RSA modulus too small (%d bits)", n.BitLen())
+	}
 
 	var result []byte
 	for i := 0; i < len(plaintext); i += chunkSize {
@@ -475,10 +540,10 @@ type Status struct {
 	BatteryCharging bool
 
 	// Mudi-only host metrics (populated from system.get_status.system).
-	UptimeSec  float64
-	CPUTempC   int
-	MCUTempC   float64
-	LoadAvg    [3]float64 // 1m / 5m / 15m
+	UptimeSec float64
+	CPUTempC  int
+	MCUTempC  float64
+	LoadAvg   [3]float64 // 1m / 5m / 15m
 
 	TxSpeed string
 	RxSpeed string

@@ -17,7 +17,9 @@ Supported devices:
 | `mudi`  | GL.iNet Mudi GL-E5800 | `192.168.8.1` | OpenWrt JSON-RPC at `/rpc`     |
 
 Same binary; the right protocol is picked by autodetect (default-gateway
-match first, parallel TCP probe as fallback) or via `--device <id>`.
+match first, parallel probe as fallback — both confirmed by a cheap
+unauthenticated *protocol* probe, see `Probe` in `device.go`) or via
+`--device <id>`.
 
 Passwords come from one of:
 
@@ -84,16 +86,19 @@ gl-sdk4-* package list, and live probing. Key things:
 2. **Battery is `system.get_status.system.mcu.charge_percent`**, not a
    dedicated `battery` service. `mcu.charging_status > 0` means
    charging.
-3. **Modem details only show up when a SIM is active.**
-   `modem.get_modems_info` returns `[]` otherwise, so the field-name
-   guessing in `parseMudiModem` is untested in CI — list multiple
-   candidates (`carrier`, `operator_name`, `operator`, …) rather than
-   guessing one.
-4. **Autodetect's first signal is the default gateway**, not a TCP
-   probe. The M7010's default IP (192.168.0.1) is often accepted as
-   "open" through upstream NAT but doesn't actually answer HTTP — a
-   pure TCP probe would pick the wrong device. See `defaultGateway()`
-   in `device.go`.
+3. **Cellular state is NOT on `/rpc` at all.** On the Mudi 7 the modem
+   is CPU-integrated, so `modem.get_modems_info` always returns `[]`
+   (it enumerates USB modems). Signal, operator, and traffic arrive as
+   pushed events on the WebSocket at `/ws` — `collectCellular` in
+   `mudi.go` + the hand-rolled client in `ws.go`. Read the
+   "Where the cellular signal actually lives" section of
+   PROTOCOL_GLINET.md before assuming an RPC method exists.
+4. **Autodetect's first signal is the default gateway**, confirmed by
+   an unauthenticated protocol probe (`probeM7010` / `probeMudi`). A
+   bare TCP probe is not enough twice over: 192.168.0.1 is often
+   accepted through upstream NAT without answering HTTP, and it's also
+   the most common home-router gateway IP. See `detectDevice()` in
+   `device.go`.
 5. **The 4.x API docs are offline.** Don't trust forum posts older
    than ~2024-01 — methods and service names have drifted. When in
    doubt, probe the device with `--debug`.
@@ -101,11 +106,16 @@ gl-sdk4-* package list, and live probing. Key things:
 ## Where things live
 
 - `client.go`   — M7010 HTTP + crypto + response parsing. `Client`
-                  type implements the `Device` interface.
-- `mudi.go`     — Mudi JSON-RPC client. `MudiClient` implements the
-                  `Device` interface.
+                  type implements the `Device` interface. Also
+                  `probeM7010` for autodetect.
+- `mudi.go`     — Mudi JSON-RPC client + WS cellular collection.
+                  `MudiClient` implements the `Device` interface.
+                  Also `probeMudi` for autodetect.
+- `ws.go`       — Minimal hand-rolled WebSocket client (handshake,
+                  frame read/write, masked sends, 1MB frame cap) for
+                  the Mudi's `/ws` event stream.
 - `device.go`   — `Device` interface, supported-device registry,
-                  autodetect (gateway + parallel TCP fallback),
+                  autodetect (gateway + parallel protocol probe),
                   password/address resolution.
 - `crypt.go`    — Pure-Go SHA-256 crypt(3) implementation for the
                   Mudi challenge response. Cross-checked against
@@ -113,9 +123,14 @@ gl-sdk4-* package list, and live probing. Key things:
 - `main.go`     — Flag parsing, mode dispatch (`runTUI`, `runWaybar`,
                   `runNoctalia`, `runRaw`, `runPower`). All modes go
                   through `pickDevice() + openDevice() + dev.Fetch()`.
-- `Makefile`    — `build / install / install-waybar / run / raw / vet / tidy`.
+- `*_test.go`   — Unit tests for the pure helpers, probes, crypt, and
+                  the WS frame parser. `make test`.
+- `Makefile`    — `build / install / install-waybar / run / raw / test / vet / tidy`.
 - `PROTOCOL.md` — TP-Link M7010 wire format.
-- `PROTOCOL_GLINET.md` — GL.iNet Mudi (GL-E5800) JSON-RPC.
+- `PROTOCOL_GLINET.md` — GL.iNet Mudi (GL-E5800) JSON-RPC + WS events.
+- `ARCHITECTURE.md` — Code structure, autodetect design, WS path.
+- `DEVELOPMENT.md`  — Build log: what was tried, what failed, what stuck.
+- `PERFORMANCE.md`  — Measured per-tick CPU/RAM/network cost.
 - `WAYBAR.md`   — This machine's setup for the waybar tile.
 - `contrib/mifi.sh` — Waybar wrapper (now a one-line exec; autodetect
                   lives in the binary).
@@ -129,15 +144,27 @@ make raw                                # whichever device is on the LAN
 ./tplink-m7010 --debug --raw            # show HTTP traffic (M7010 includes crypto)
 ```
 
-There's no unit test suite — everything interesting is an integration
-against a physical device and none of us has a reliable simulator. The
-one exception is `crypt.go`: `sha256Crypt` can be cross-checked against
-`openssl passwd -5 -salt SALT KEY` in a few seconds.
+`make test` runs the unit suite: `sha256Crypt` (openssl-verified
+vectors), the pure helpers (`rsrpToSignal`, `networkTypeStr`,
+`friendlyNetworkType`, `formatUptime`, `pickActiveSlot`, `jsonFloatStr`,
+`intFrom`, `parseDefaultGateway`, PKCS#7), the WS frame parser (byte
+fixtures), and the autodetect probes (httptest).
 
-Add tests for the helpers (`firstStr`, `firstInt`, `rsrpToSignal`,
-`networkTypeStr`, `parseFloatStr`, `defaultGateway`, `sha256Crypt`) if
-you're editing them. Leave the crypto envelope uncovered unless you
-want to record/replay a real session.
+Both protocol envelopes are covered end-to-end by **fake-device tests**:
+
+- `m7010_envelope_test.go` — an httptest server implementing the M7010
+  server side (real 512-bit RSA decrypt, strict sign-string *order*
+  validation, AES round-trip, digest check). If you reorder the sign
+  string or touch the crypto, this fails the way the hardware would.
+- `mudi_envelope_test.go` — fake `/rpc` (challenge/login with real
+  sha256-crypt verification, args-must-be-array enforcement) plus a
+  real WS handshake on `/ws` pushing the three cellular events.
+
+Extend the fakes when you add fields — put the new field in the canned
+response and assert it on `Status`. Live devices are still the final
+word for anything the fakes only *assume* (firmware quirks, timing).
+CI (`.github/workflows/ci.yml`) runs gofmt + vet + test + build on
+every push/PR.
 
 **Live testing tips:**
 

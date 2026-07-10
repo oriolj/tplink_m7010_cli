@@ -1,8 +1,17 @@
 # Architecture
 
-Five Go files, one binary. Two router families share the data model and
+Six Go files, one binary. Two router families share the data model and
 output formatters; the protocol-specific code is isolated behind the
 `Device` interface.
+
+| File        | Role                                                        |
+| ----------- | ----------------------------------------------------------- |
+| `main.go`   | Flags, mode dispatch, TUI, waybar/noctalia formatters       |
+| `device.go` | `Device` interface, device registry, autodetect, passwords  |
+| `client.go` | TP-Link M7010 client (AES+RSA envelope)                     |
+| `mudi.go`   | GL.iNet Mudi client (JSON-RPC + WebSocket event collection) |
+| `ws.go`     | Minimal hand-rolled WebSocket client used by `mudi.go`      |
+| `crypt.go`  | SHA-256 crypt(3) for the Mudi challenge/response            |
 
 ## Process flow
 
@@ -19,9 +28,10 @@ main.go :: main()
 every mode goes through:
    pickDevice()            -- explicit --device, or detectDevice()
      ├── defaultGateway()  -- /proc/net/route → IP; instant
-     └── parallel TCP probe (500ms per device)
+     │     └── confirmed by d.Probe() (unauthenticated protocol hello)
+     └── parallel d.Probe() of every resolved address (500ms timeout)
    openDevice(d, ...)      -- resolveAddr + resolvePassword + d.New().Connect()
-   dev.Fetch()             -- one or two protocol-specific RPCs → *Status
+   dev.Fetch()             -- protocol-specific RPCs (Mudi: RPC + WS) → *Status
    (dev.Close()            -- best-effort logout, async-safe)
 ```
 
@@ -34,7 +44,6 @@ so the laptop battery isn't burned on doomed logins.
 ```go
 type Device interface {
     Name() string                   // human label
-    Addr() string                   // address we're talking to
     Connect(password string) error  // login
     Fetch() (*Status, error)        // pull live state into Status
     Shutdown() error                // power off
@@ -45,25 +54,35 @@ type Device interface {
 
 Both `*Client` (M7010) and `*MudiClient` implement it. Adding a third
 device is a matter of writing another file and appending an entry to
-`supportedDevices` in `device.go`.
+`supportedDevices` in `device.go` — the full checklist is at the end of
+this document.
 
 ## Autodetect (the laptop-battery story)
 
 We try two signals in order:
 
 1. **Default gateway**. If the kernel's default route points at a
-   known device IP, that's where our traffic is already going — picking
-   it costs ~0ms and is unambiguous.
-2. **Parallel TCP probe**. Each device's port 80 is dialed with a
-   500ms timeout, in parallel. First reachable wins (in registration
-   order, not race order — flapping between two simultaneously-up
-   routers is worse than a stable wrong-but-consistent choice).
+   known device address (env overrides included), that's where our
+   traffic is already going — the cheapest possible hint.
+2. **Parallel protocol probe**. Every device's resolved address is
+   probed in parallel with a 500ms timeout. First hit wins in
+   registration order, not race order — flapping between two
+   simultaneously-up routers is worse than a stable choice.
 
-The gateway-first ordering specifically defends against false positives
-on `192.168.0.1`: that address is often "accepted" by upstream NAT but
-doesn't respond to HTTP. A pure TCP probe was picking the M7010 even
-when only the Mudi was on the LAN — using the gateway as the first
-signal makes the right answer free.
+Both signals are confirmed by the device's `Probe` function — one
+unauthenticated HTTP round-trip that checks the *protocol*, not just
+TCP reachability (`probeM7010` sends the step-1 hello and looks for
+the nonce; `probeMudi` sends a `challenge` and looks for salt+nonce).
+
+This matters twice over:
+
+- `192.168.0.1:80` is often "accepted" by upstream NAT without anything
+  answering HTTP — a bare TCP probe used to pick the M7010 when only
+  the Mudi was on the LAN.
+- `192.168.0.1` is also the most common *home router* gateway address.
+  Without the protocol check, any such LAN made autodetect claim an
+  M7010 was present, and the widget rendered a login-error tile instead
+  of collapsing.
 
 ## Client state
 
@@ -138,12 +157,29 @@ TUI / waybar formatter skips them based on truthiness.
 
 Both clients tolerate firmware drift by:
 
-- Trying multiple field names in order (`firstStr`, `firstInt`,
-  `firstFloatish`). Add candidates when a new firmware shows up, don't
-  rip out the old ones.
-- Mapping numeric enums to strings (`networkTypeStr`) in one place.
+- Reading fields through nil-safe helpers (`jsonStr`, `jsonInt`,
+  `jsonBool`, `jsonFloatStr`, `subMap`) instead of raw type asserts.
+- Mapping numeric enums to strings (`networkTypeStr`,
+  `friendlyNetworkType`) in one place.
 - Parsing decimal-string byte counts (e.g. `"14473800628.000000"`)
-  through `firstFloatish`, which falls through to numeric types too.
+  through `jsonFloatStr`, which falls through to JSON numbers too.
+
+## Mudi WebSocket path (`ws.go`)
+
+The Mudi 7's CPU-integrated modem exposes **no `/rpc` method** for
+cellular state — signal, operator, and traffic only arrive as pushed
+events on `ws://<addr>/ws?sid=<sid>` (see PROTOCOL_GLINET.md for the
+discovery story and event schema). `MudiClient.Fetch` therefore runs
+two collectors in parallel:
+
+- `system.get_status` over `/rpc` (battery, uptime, temps, clients);
+- `collectCellular` over `/ws` — subscribe to the three `cellular.*`
+  topics, read until all three arrived or a 2s deadline elapses.
+
+`ws.go` is a deliberately tiny hand-rolled client (handshake, read
+frames, masked writes, ping→pong, 1MB frame-size cap) — receive-mostly,
+no gorilla/websocket dependency. The WS failing is non-fatal: the
+widget just shows the RPC-derived fields.
 
 ## TUI model (Bubble Tea)
 
@@ -175,3 +211,36 @@ helper so the two outputs can't drift.
 When no router is reachable, both modes emit an empty JSON object
 (`{"text":"","tooltip":""…}`) and exit zero — that hides the widget
 without requiring a wrapper to handle the silence.
+
+## Adding a new device — checklist
+
+The interface is small on purpose; everything protocol-specific stays in
+one new file. In order:
+
+1. **Reverse-engineer first, code second.** Write the wire format down in
+   a `PROTOCOL_<VENDOR>.md` *as you discover it* — both existing protocol
+   docs exist because the knowledge evaporates otherwise. Capture real
+   request/response samples (redact IMEI/ICCID/passwords).
+2. **`<device>.go`** — a client type implementing `Device` (Name,
+   Connect, Fetch, Shutdown, Reboot, Close). Parse responses through the
+   nil-safe helpers (`jsonStr`, `jsonInt`, `jsonFloatStr`, `subMap`) and
+   map onto the shared `Status` struct; leave fields the device can't
+   fill at their zero value — the formatters skip them.
+3. **A `probe<Device>` function** — one *unauthenticated* HTTP round-trip
+   that proves the address speaks this protocol (a hello, a challenge, a
+   version endpoint). Bare TCP reachability is not a signal; see the
+   autodetect section above for why.
+4. **Registry entry in `supportedDevices`** (`device.go`): ID, Title,
+   DefaultAddr, `AddrEnvs` + `PasswordEnvs` (primary spelling first),
+   `PasswordPath` under `~/.config/`, `New`, `Probe`.
+5. **Tests** — a fake-device test in the style of
+   `m7010_envelope_test.go` / `mudi_envelope_test.go` (httptest server
+   speaking the server side of the protocol), plus unit tests for any
+   new pure helpers. Probe tests included: real hello accepted, generic
+   HTTP server rejected.
+6. **Docs** — README (device table, password section), CLAUDE.md
+   (landmines you hit; there will be some), and a Makefile
+   `CONFDIR_<DEV>` + password-hint line in the `install` target.
+7. **Live-test safety** — don't fire Shutdown/Reboot against hardware
+   you can't physically restart. Add any new footguns to CLAUDE.md's
+   "Live testing tips".

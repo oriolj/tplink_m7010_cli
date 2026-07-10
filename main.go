@@ -11,18 +11,20 @@
 //   - TP-Link M7010 (AES+RSA envelope; see PROTOCOL.md, client.go)
 //   - GL.iNet Mudi GL-E5800 (OpenWrt JSON-RPC; see PROTOCOL_GLINET.md, mudi.go)
 //
-// By default the daemon TCP-probes both default addresses in parallel and
-// talks only to whichever answers first — if neither is reachable, widget
-// modes emit empty output and exit so the laptop battery isn't burned on
-// pointless retries. Use `--device m7010|mudi` to skip autodetect, or
-// `--addr` to override the address for the selected device.
+// By default the binary autodetects which router is on the LAN: it first
+// checks whether the kernel's default gateway matches a known device
+// address, then falls back to probing both addresses in parallel. Both
+// signals are confirmed with a cheap unauthenticated protocol probe (see
+// detectDevice in device.go). If nothing answers, widget modes emit empty
+// output and exit so the laptop battery isn't burned on pointless
+// retries. Use `--device m7010|mudi` to skip autodetect, or `--addr` to
+// override the address for the selected device.
 package main
 
 import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -92,17 +94,6 @@ func pickDevice() *SupportedDevice {
 		return d
 	}
 	return detectDevice(detectTimeout)
-}
-
-// reachable returns true if a TCP connection to addr:80 succeeds within
-// timeout. Used by detectDevice's fallback path.
-func reachable(addr string, timeout time.Duration) bool {
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(addr, "80"), timeout)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
 }
 
 func runPower(action powerAction) {
@@ -201,7 +192,7 @@ func runNoctalia() {
 	text, tooltip, class := formatStatusLine(d, status)
 	enc.Encode(noctaliaOutput{
 		Text:      text,
-		Tooltip:   strings.TrimRight(tooltip, "\n"),
+		Tooltip:   tooltip, // formatStatusLine already trims the trailing newline
 		TextColor: classToNoctaliaColor(class),
 	})
 }
@@ -434,6 +425,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = msg.err
 		m.actionResult = ""
 	case tickMsg:
+		// If the previous fetch is still in flight, don't queue another
+		// behind the device mutex — just reschedule the tick.
+		if m.loading {
+			return m, tickCmd(m.refresh)
+		}
 		m.loading = true
 		return m, tea.Batch(fetchCmdFor(m.device), tickCmd(m.refresh))
 	case actionMsg:

@@ -9,8 +9,7 @@ package main
 // data-used etc. We hand-roll instead of pulling in gorilla/websocket
 // because we only need a tiny subset: handshake + read text frames.
 //
-// We do not send data frames; therefore we never need to mask anything,
-// and we skip the Sec-WebSocket-Accept verification (we're talking to a
+// We skip the Sec-WebSocket-Accept verification (we're talking to a
 // known device on the LAN, not the public internet).
 
 import (
@@ -31,6 +30,11 @@ const (
 	wsOpcodeClose = 0x8
 	wsOpcodePing  = 0x9
 	wsOpcodePong  = 0xA
+
+	// wsMaxFrameSize caps how much we'll allocate for one frame's payload.
+	// The Mudi's event bursts are a few KB; anything near this limit is a
+	// corrupt or hostile length field, not real data.
+	wsMaxFrameSize = 1 << 20
 )
 
 type wsConn struct {
@@ -43,7 +47,13 @@ type wsConn struct {
 // (dial, handshake, and subsequent reads/writes) — set once here, the
 // caller does not need to touch SetDeadline again.
 func dialWS(addr, path, cookie string, deadline time.Time) (*wsConn, error) {
-	c, err := net.DialTimeout("tcp", net.JoinHostPort(addr, "80"), time.Until(deadline))
+	// addr is usually a bare IP (default port 80), but honour an explicit
+	// host:port — --addr 192.168.8.1:8080 must reach the WS too.
+	hostport := addr
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		hostport = net.JoinHostPort(addr, "80")
+	}
+	c, err := net.DialTimeout("tcp", hostport, time.Until(deadline))
 	if err != nil {
 		return nil, fmt.Errorf("ws dial: %w", err)
 	}
@@ -113,6 +123,9 @@ func (w *wsConn) readMessage() ([]byte, error) {
 			}
 			plen = binary.BigEndian.Uint64(ext)
 		}
+		if plen > wsMaxFrameSize {
+			return nil, fmt.Errorf("ws frame payload %d exceeds %d byte cap", plen, wsMaxFrameSize)
+		}
 		var maskKey [4]byte
 		if masked {
 			mk, err := readN(w.r, 4)
@@ -137,8 +150,9 @@ func (w *wsConn) readMessage() ([]byte, error) {
 		case wsOpcodeClose:
 			return nil, io.EOF
 		case wsOpcodePing:
-			// Reply with pong (header only — empty payload).
-			w.c.Write([]byte{0x80 | wsOpcodePong, 0})
+			// Pong must echo the ping payload (RFC 6455 §5.5.3) and be
+			// masked like every other client→server frame. Best-effort.
+			w.sendFrame(wsOpcodePong, payload)
 			continue
 		default:
 			// Skip continuation, binary, pong frames — we don't expect any.
@@ -147,13 +161,13 @@ func (w *wsConn) readMessage() ([]byte, error) {
 	}
 }
 
-// sendText writes a text frame. Client→server frames are mask-required
-// per RFC 6455 §5.3.
-func (w *wsConn) sendText(payload string) error {
-	data := []byte(payload)
-	plen := len(data)
+// sendFrame writes one masked frame. Client→server frames are
+// mask-required per RFC 6455 §5.3 — a compliant server MUST drop the
+// connection on an unmasked one.
+func (w *wsConn) sendFrame(opcode byte, payload []byte) error {
+	plen := len(payload)
 	var hdr []byte
-	hdr = append(hdr, 0x80|wsOpcodeText)
+	hdr = append(hdr, 0x80|opcode)
 	switch {
 	case plen < 126:
 		hdr = append(hdr, 0x80|byte(plen))
@@ -169,21 +183,21 @@ func (w *wsConn) sendText(payload string) error {
 	rand.Read(mask[:])
 	hdr = append(hdr, mask[:]...)
 	masked := make([]byte, plen)
-	for i, b := range data {
+	for i, b := range payload {
 		masked[i] = b ^ mask[i%4]
 	}
 	_, err := w.c.Write(append(hdr, masked...))
 	return err
 }
 
+// sendText writes a text frame.
+func (w *wsConn) sendText(payload string) error {
+	return w.sendFrame(wsOpcodeText, []byte(payload))
+}
+
 // close sends a close frame and tears down the connection. Best-effort.
 func (w *wsConn) close() error {
-	// Close frame, masked from client side per RFC 6455 §5.3. Empty body.
-	mask := make([]byte, 4)
-	rand.Read(mask)
-	frame := []byte{0x80 | wsOpcodeClose, 0x80}
-	frame = append(frame, mask...)
-	w.c.Write(frame)
+	w.sendFrame(wsOpcodeClose, nil)
 	return w.c.Close()
 }
 
