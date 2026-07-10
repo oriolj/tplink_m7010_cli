@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -54,6 +55,42 @@ func TestViewDerivedRateWhenNoSplitSpeeds(t *testing.T) {
 	out := m.View()
 	if !strings.Contains(out, "≈ 1.5 MB/s") {
 		t.Errorf("View() missing derived rate; got:\n%s", out)
+	}
+}
+
+func TestFormatStatusLineSpeed(t *testing.T) {
+	s := &Status{NetworkType: "4G", RxSpeed: "2964", TxSpeed: "2202"}
+	_, tooltip, _ := formatStatusLine(&supportedDevices[0], s)
+	if !strings.Contains(tooltip, "Speed: ↓ 2.9 KB/s  ↑ 2.2 KB/s") {
+		t.Errorf("tooltip missing speed line:\n%s", tooltip)
+	}
+
+	// No speeds reported (Mudi): no speed line at all.
+	_, tooltip, _ = formatStatusLine(&supportedDevices[1], &Status{NetworkType: "5G"})
+	if strings.Contains(tooltip, "Speed:") {
+		t.Errorf("tooltip has spurious speed line:\n%s", tooltip)
+	}
+}
+
+func TestStatusJSONShape(t *testing.T) {
+	s := &Status{
+		NetworkType:    "5G",
+		BatteryPercent: 88,
+		TotalBytes:     1234,
+		RawStatus:      map[string]any{"secret": "big"},
+	}
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	out := string(b)
+	for _, want := range []string{`"network_type":"5G"`, `"battery_percent":88`, `"total_bytes":1234`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("JSON missing %s in %s", want, out)
+		}
+	}
+	if strings.Contains(out, "RawStatus") || strings.Contains(out, "secret") {
+		t.Errorf("raw maps leaked into --json output: %s", out)
 	}
 }
 

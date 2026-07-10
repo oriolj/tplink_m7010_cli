@@ -519,44 +519,47 @@ func rsaEncryptBlock(msg []byte, n, e *big.Int, keyLen int) ([]byte, error) {
 
 // --- Status ---
 
+// Status is the shared data model both device clients fill. The JSON tags
+// define the stable `--json` scripting output; the raw maps are excluded
+// there (use --raw for those).
 type Status struct {
-	Model    string
-	Firmware string
-	Operator string
+	Model    string `json:"model,omitempty"`
+	Firmware string `json:"firmware,omitempty"`
+	Operator string `json:"operator,omitempty"`
 
-	NetworkType    string // short label like "5G", "4G+"
-	NetworkTypeRaw string // technical mode from the modem (e.g. "LTE FDD", "NR5G-NSA"); empty for M7010
-	Band           int
-	DLBandwidth    string // channel bandwidth label, e.g. "100MHz"; Mudi-only
-	ConnectStatus  int
-	SignalStrength int // 0-5; firmware reports 0, we derive from RSRP
-	RSRP           int // dBm
-	RSRQ           int
-	RSSI           int
-	SNR            int
-	WanIP          string
+	NetworkType    string `json:"network_type,omitempty"`     // short label like "5G", "4G+"
+	NetworkTypeRaw string `json:"network_type_raw,omitempty"` // technical mode from the modem (e.g. "LTE FDD", "NR5G-NSA"); empty for M7010
+	Band           int    `json:"band,omitempty"`
+	DLBandwidth    string `json:"dl_bandwidth,omitempty"` // channel bandwidth label, e.g. "100MHz"; Mudi-only
+	ConnectStatus  int    `json:"connect_status,omitempty"`
+	SignalStrength int    `json:"signal_strength"` // 0-5; firmware reports 0, we derive from RSRP
+	RSRP           int    `json:"rsrp,omitempty"`  // dBm
+	RSRQ           int    `json:"rsrq,omitempty"`
+	RSSI           int    `json:"rssi,omitempty"`
+	SNR            int    `json:"snr,omitempty"`
+	WanIP          string `json:"wan_ip,omitempty"`
 
-	BatteryPercent  int
-	BatteryCharging bool
+	BatteryPercent  int  `json:"battery_percent"`
+	BatteryCharging bool `json:"battery_charging"`
 
 	// Mudi-only host metrics (populated from system.get_status.system).
-	UptimeSec float64
-	CPUTempC  int
-	MCUTempC  float64
-	LoadAvg   [3]float64 // 1m / 5m / 15m
+	UptimeSec float64    `json:"uptime_sec,omitempty"`
+	CPUTempC  int        `json:"cpu_temp_c,omitempty"`
+	MCUTempC  float64    `json:"mcu_temp_c,omitempty"`
+	LoadAvg   [3]float64 `json:"load_avg"` // 1m / 5m / 15m
 
-	TxSpeed string
-	RxSpeed string
+	TxSpeed string `json:"tx_speed,omitempty"`
+	RxSpeed string `json:"rx_speed,omitempty"`
 
-	TotalBytes       float64
-	DailyBytes       float64
-	AdjustedBytes    float64
-	MonthLimitBytes  float64
-	PaymentDay       int
-	ConnectedDevices int
+	TotalBytes       float64 `json:"total_bytes"`
+	DailyBytes       float64 `json:"daily_bytes,omitempty"`
+	AdjustedBytes    float64 `json:"adjusted_bytes,omitempty"`
+	MonthLimitBytes  float64 `json:"month_limit_bytes,omitempty"`
+	PaymentDay       int     `json:"payment_day,omitempty"`
+	ConnectedDevices int     `json:"connected_devices,omitempty"`
 
-	RawStatus   map[string]any
-	RawFlowStat map[string]any
+	RawStatus   map[string]any `json:"-"`
+	RawFlowStat map[string]any `json:"-"`
 }
 
 func networkTypeStr(t int) string {

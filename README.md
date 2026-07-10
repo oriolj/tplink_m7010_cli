@@ -48,6 +48,7 @@ The TUI adds a few things the widgets don't show:
 | TUI        | (default)         | Interactive dashboard, polls every 10s       |
 | Waybar     | `--waybar`        | Single JSON line: `{text, tooltip, class}`   |
 | Noctalia   | `--noctalia`      | Single JSON line for the noctalia-shell widget |
+| JSON       | `--json`          | Parsed status as machine-readable JSON, for scripts |
 | Raw dump   | `--raw`           | Pretty-printed raw API responses (per device) |
 | Power off  | `--poweroff`      | Shut the router down                         |
 | Reboot     | `--reboot`        | Restart the router                           |
@@ -61,6 +62,7 @@ The TUI adds a few things the widgets don't show:
 --pass      admin password (overrides env var and password file)
 --waybar    waybar JSON mode
 --noctalia  noctalia-shell JSON mode
+--json      parsed status as JSON (stable scripting interface)
 --raw       dump raw API responses
 --poweroff  power the router off and exit
 --reboot    reboot the router and exit
@@ -138,11 +140,16 @@ Two related notes:
   session at a time, this can keep the browser UI locked out until the
   token expires — log in from the TUI or wait a minute if that bites.
 
-## Waybar integration
+## Waybar / noctalia integration
 
-See `WAYBAR.md` for the setup on this machine (binary path, password file,
-wrapper script). With autodetect baked into the binary, the wrapper is now
-a single-line `exec`.
+See `WAYBAR.md` and `NOCTALIA.md` for the setup on this machine (binary
+path, password file, wrapper script, widget settings). With autodetect
+baked into the binary, the waybar wrapper is now a single-line `exec`.
+
+Heads-up for noctalia: the exec-JSON CustomButton this feeds exists in
+the QML v4.x series; the v5 C++ rewrite replaced it with a plugin
+system. `--json` is the version-independent interface to build on —
+see `NOCTALIA.md`.
 
 ## Protocol notes
 
@@ -162,6 +169,7 @@ specific landmines.
 | `PROTOCOL_GLINET.md`  | GL.iNet Mudi (GL-E5800) JSON-RPC                                       |
 | `ARCHITECTURE.md`     | Code structure, multi-device flow, TUI model                           |
 | `WAYBAR.md`           | Waybar setup on this specific machine                                  |
+| `NOCTALIA.md`         | Noctalia CustomButton setup + v4/v5 version caveat                     |
 | `PERFORMANCE.md`      | Measured per-tick CPU/RAM/network cost + daily power estimate          |
 | `DEVELOPMENT.md`      | Build log: what was tried, what failed, what stuck                     |
 | `CLAUDE.md`           | Pointers for future Claude Code sessions                               |

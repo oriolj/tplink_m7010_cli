@@ -22,6 +22,7 @@ main.go :: main()
    ├── --reboot   → runPower("reboot")
    ├── --waybar   → runWaybar()
    ├── --noctalia → runNoctalia()
+   ├── --json     → runJSON()
    ├── --raw      → runRaw()
    └── (default)  → runTUI()
 
@@ -226,7 +227,16 @@ helper so the two outputs can't drift.
 
 When no router is reachable, both modes emit an empty JSON object
 (`{"text":"","tooltip":""…}`) and exit zero — that hides the widget
-without requiring a wrapper to handle the silence.
+without requiring a wrapper to handle the silence. A fetch error
+*after* a successful protocol probe is different: the device is real
+and something is wrong (usually the password), so both modes render an
+error tile (`--` + tooltip) instead of hiding it.
+
+There is also `--json` — the parsed `Status` as machine-readable JSON
+(`{device, title, status}`; field names via the struct's json tags,
+raw maps excluded). That's the stable scripting interface for anything
+that isn't waybar or the QML-era noctalia CustomButton: a future
+noctalia v5 plugin, eww, polybar, or plain shell scripts.
 
 ## Adding a new device — checklist
 

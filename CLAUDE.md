@@ -121,8 +121,11 @@ gl-sdk4-* package list, and live probing. Key things:
                   Mudi challenge response. Cross-checked against
                   `openssl passwd -5`.
 - `main.go`     — Flag parsing, mode dispatch (`runTUI`, `runWaybar`,
-                  `runNoctalia`, `runRaw`, `runPower`). All modes go
-                  through `pickDevice() + openDevice() + dev.Fetch()`.
+                  `runNoctalia`, `runJSON`, `runRaw`, `runPower`). All
+                  modes go through `pickDevice() + openDevice() +
+                  dev.Fetch()`. `--json` is the stable scripting
+                  interface — prefer extending it over inventing new
+                  widget-specific output modes.
 - `*_test.go`   — Unit tests for the pure helpers, probes, crypt, and
                   the WS frame parser. `make test`.
 - `Makefile`    — `build / install / install-waybar / run / raw / test / vet / tidy`.
@@ -132,6 +135,9 @@ gl-sdk4-* package list, and live probing. Key things:
 - `DEVELOPMENT.md`  — Build log: what was tried, what failed, what stuck.
 - `PERFORMANCE.md`  — Measured per-tick CPU/RAM/network cost.
 - `WAYBAR.md`   — This machine's setup for the waybar tile.
+- `NOCTALIA.md` — Noctalia CustomButton setup, output contract, and the
+                  v4 (QML, exec-JSON works) vs v5 (C++, plugins only)
+                  version caveat.
 - `contrib/mifi.sh` — Waybar wrapper (now a one-line exec; autodetect
                   lives in the binary).
 

@@ -4,6 +4,7 @@
 //   - default:    interactive Bubble Tea TUI dashboard
 //   - --waybar:   single JSON line for use as a waybar custom module
 //   - --noctalia: single JSON line for the noctalia-shell CustomButton widget
+//   - --json:     parsed status as machine-readable JSON, for scripts
 //   - --raw:      raw API responses, for debugging / exploration
 //
 // Two device families are supported in the same binary:
@@ -42,6 +43,7 @@ var (
 	flagPass     = flag.String("pass", "", "admin password (overrides env var and password file)")
 	flagWaybar   = flag.Bool("waybar", false, "output waybar JSON and exit")
 	flagNoctalia = flag.Bool("noctalia", false, "output noctalia-shell CustomButton JSON and exit")
+	flagJSON     = flag.Bool("json", false, "output the parsed status as JSON and exit (for scripts)")
 	flagRaw      = flag.Bool("raw", false, "dump raw API responses and exit")
 	flagDebug    = flag.Bool("debug", false, "print debug HTTP traffic")
 	flagPoweroff = flag.Bool("poweroff", false, "power the router off and exit")
@@ -75,6 +77,8 @@ func main() {
 		runWaybar()
 	case *flagNoctalia:
 		runNoctalia()
+	case *flagJSON:
+		runJSON()
 	case *flagRaw:
 		runRaw()
 	default:
@@ -187,7 +191,14 @@ func runNoctalia() {
 	}
 	status, err := fetchOnce(d)
 	if err != nil {
-		enc.Encode(noctaliaOutput{})
+		// A fetch error after a successful protocol probe means a real
+		// device with a real problem (wrong password, firmware change) —
+		// show it instead of silently collapsing like the no-device case.
+		enc.Encode(noctaliaOutput{
+			Text:      "--",
+			Tooltip:   "Error: " + err.Error(),
+			TextColor: "error",
+		})
 		return
 	}
 	text, tooltip, class := formatStatusLine(d, status)
@@ -249,6 +260,11 @@ func formatStatusLine(d *SupportedDevice, s *Status) (text, tooltip, class strin
 		fmt.Fprintf(&tb, " / %.0f GB", limitGB)
 	}
 	fmt.Fprintf(&tb, "\n")
+	// The M7010 reports live speeds; the Mudi doesn't (deriving them
+	// needs cross-tick state, which one-shot widget modes don't keep).
+	if rx, tx := parseSpeed(s.RxSpeed), parseSpeed(s.TxSpeed); rx > 0 || tx > 0 {
+		fmt.Fprintf(&tb, "Speed: ↓ %s  ↑ %s\n", humanRate(rx), humanRate(tx))
+	}
 	if s.WanIP != "" {
 		fmt.Fprintf(&tb, "WAN IP: %s\n", s.WanIP)
 	}
@@ -276,6 +292,32 @@ func formatStatusLine(d *SupportedDevice, s *Status) (text, tooltip, class strin
 		class = "disconnected"
 	}
 	return text, tooltip, class
+}
+
+// --- JSON mode ---
+
+// runJSON emits the parsed Status as machine-readable JSON. This is the
+// stable scripting interface: unlike --waybar / --noctalia it isn't tied
+// to any bar's widget schema, so a future noctalia plugin, eww, polybar,
+// or a shell script can consume it without us chasing widget formats.
+func runJSON() {
+	d := pickDevice()
+	if d == nil {
+		fmt.Fprintln(os.Stderr, "no supported router reachable")
+		os.Exit(1)
+	}
+	status, err := fetchOnce(d)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	enc.Encode(struct {
+		Device string  `json:"device"`
+		Title  string  `json:"title"`
+		Status *Status `json:"status"`
+	}{d.ID, d.Title, status})
 }
 
 // --- Raw dump mode ---
