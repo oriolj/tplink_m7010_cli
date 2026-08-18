@@ -13,8 +13,17 @@ The one exception to "no state": `battery.go` keeps a percent history in
 `$XDG_STATE_HOME/tplink-m7010/battery.json`. It has to. Neither device
 reports a remaining time, so the only way to get one is to measure how
 fast the percent moves, and a one-shot process cannot do that from a
-single reading. Everything in that file is disposable — deleting it costs
-one warm-up window.
+single reading. The file holds two different things, and the distinction
+is the design:
+
+- the **window** (`runs`) — the current contiguous observation, reset the
+  moment continuity breaks;
+- the **learning** (`discharge` / `charge`) — a pooled (percent, hours)
+  average per router that survives those resets, so the next cold start
+  begins from what this unit actually averages.
+
+Everything in it is disposable — deleting it costs a warm-up window and
+the learned average.
 
 Supported devices:
 
@@ -102,7 +111,20 @@ gl-sdk4-* package list, and live probing. Key things:
    looks exactly like one barely discharging, and that reading inflates
    the estimate. Anything over `batteryGapMax` resets the history.
 4. **Don't add a charging bootstrap** without a source: neither vendor
-   publishes a charge time, so time-to-full stays silent until measured.
+   publishes a charge time. Time-to-full stays silent until measured —
+   after the first charge session the learned pool covers it.
+5. **Bank incrementally, never in bulk.** `observe` folds each transition
+   into the pool exactly once, against the previous transition, and
+   clears the pending edge on reset. Re-deriving the pool from the run
+   list instead would double count on every poll and lose everything the
+   12 h/256-entry trim drops.
+6. **The window reset and the learning are deliberately separate.** A
+   reset means "cannot measure across this discontinuity", not "know
+   nothing about this router" — conflating them is what sent the estimate
+   back to a vendor number every time the charger was touched.
+7. **`observed_runtime_hours` is not battery health** and must not be
+   presented as such: it mixes cell ageing with how hard the router was
+   worked. See the README section.
 
 ### Mudi (GL.iNet GL-E5800)
 

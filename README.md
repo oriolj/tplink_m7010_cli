@@ -135,16 +135,51 @@ How the number is arrived at:
   percent changed*. Between two such edges the drop is exactly N percent
   and the only error left is the poll interval.
 - **A warm-up gate.** One percent step is a sample size of one, so the
-  measurement is not trusted until 3 steps have been observed (~20 min at
-  a typical rate). Until then the estimate falls back to the model's
-  datasheet runtime — 8 h for the M7010, 13.5 h for the Mudi 7 — and is
-  labelled **`(typical)`** so a guess never reads as a measurement.
-- **Continuity checks.** The history resets when the charger is plugged or
-  unplugged, when polling has been silent for over 20 min (a router that
-  was *off* looks identical to one discharging very slowly, and that
-  reading inflates the estimate), and on any double-digit jump.
-- **Charging** shows time-to-full, but only once measured: neither vendor
-  publishes a charge time, so there is no datasheet bootstrap for it.
+  in-session measurement is not trusted until 3 steps have been observed
+  (~20 min at a typical rate).
+- **A learned rate covers the warm-up.** Every step observed is banked
+  into a pooled average for that router, which *survives* the window
+  resets below. So from the second session onwards the cold start is
+  "what this unit actually averages", not a vendor claim — labelled
+  **`(avg)`**.
+- **The datasheet is the last resort**, used only before anything has
+  been learned: 8 h for the M7010, 13.5 h for the Mudi 7. Labelled
+  **`(typical)`** so a guess never reads as a measurement. It also stays
+  on as a weak prior inside the pool, so one unusually idle session
+  cannot swing the estimate wholesale.
+- **Continuity checks.** The *window* resets when the charger is plugged
+  or unplugged, when polling has been silent for over 20 min (a router
+  that was *off* looks identical to one discharging very slowly, and that
+  reading inflates the estimate), and on any double-digit jump. The
+  *learning* survives all three: a reset means "I cannot measure across
+  this discontinuity", not "I know nothing about this router".
+- **Charging** shows time-to-full. There is no datasheet bootstrap (no
+  vendor publishes a charge time), so it appears once measured — and from
+  the next session on, straight away.
+
+So the estimate degrades in three steps, best-known first:
+
+| Source      | Shown as     | Means                                            |
+| ----------- | ------------ | ------------------------------------------------ |
+| `measured`  | `~4h12m`     | this session's own rate — reflects current load  |
+| `learned`   | `~4h12m (avg)`  | this router's average across past sessions    |
+| `typical`   | `~4h12m (typical)` | the vendor's datasheet runtime             |
+
+### Is that battery health?
+
+Not quite, and `--json` says so in a comment. `battery_learned` reports
+`observed_runtime_hours` — how long a full charge has actually lasted
+**under your usage** — which mixes cell ageing with how hard the router
+was worked (five clients streaming on a weak signal drain a healthy
+battery fast). Separating the two needs a full-charge capacity readout,
+which neither device exposes, or a controlled-load test. Compare it
+against `typical_runtime_hours` as a **trend over months**, not as a
+health percentage.
+
+Note also what the pool implicitly selects for: samples only accrue while
+something is polling, i.e. while your laptop is awake behind the router.
+What is learned is therefore the rate *under use*, not idle standby —
+which is the rate you want when you ask how long it will last.
 
 Where it shows: the TUI dashboard as its own `Remaining` / `To full` row,
 the waybar and noctalia **tooltips**, and `--json` as `battery_estimate`.

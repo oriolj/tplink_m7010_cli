@@ -246,21 +246,35 @@ observation into the on-disk history and returns the best estimate
 available.
 
 ```
-observation ──► appendBatterySample ──► runs []batteryRun ──► measuredRate
-                (reset on charger flip,                        (skips runs[0],
-                 >20 min gap, ±10% jump)                        needs 3 steps)
-                                                                    │
-                        datasheet TypicalRuntime ◄── no ── warm? ────┤
-                                    │                               │ yes
-                                    ▼                               ▼
-                              "(typical)"                      measured rate
-                                    └────────► batteryEstimate ◄────┘
+observation ──► observe ──┬──► runs []batteryRun ────► measuredRate ──┐
+                          │    (reset on charger flip,  (skips runs[0], │
+                          │     >20 min gap, ±10% jump)  needs 3 steps) │
+                          │                                            │
+                          └──► bank(edge → edge) ──► discharge/charge   │
+                               (once per transition)   pooled average   │
+                               survives every reset          │          │
+                                                             ▼          ▼
+                    datasheet ◄── nothing ── learned? ──► "(avg)"  "measured"
+                    "(typical)"    learned      │                       │
+                          └──────────────► batteryEstimate ◄────────────┘
 ```
+
+Source priority is strict: `measured` (this session, reflects current
+load) beats `learned` (this unit's own average) beats `typical` (a vendor
+claim about a new cell in a lab).
 
 A `batteryRun` is one span of a held percent: `From` is the edge (first
 sighting, what the rate is measured against), `To` is the newest sample
 still reading it (what gap detection needs). That shape is why the file
 stays small — a full discharge is ~100 entries, not one per poll.
+
+`batteryLearned` keeps its two sums (percent, hours) rather than a rate,
+because pooling the sums is the physically correct average — averaging
+per-window rates would weight a 3-minute window like a 3-hour one. It is
+bounded at `batteryLearnMaxPct` (~2 discharges) by scaling both sums down
+together, which preserves the rate while making room for newer evidence,
+so an ageing cell surfaces within a couple of cycles instead of being
+diluted forever.
 
 Rendering is split by surface: `Label()` for the widget tooltips,
 `RowLabel()`/`RowValue()` for the TUI (the 46-column box wraps if the

@@ -27,9 +27,13 @@ func runsAt(pairs ...[2]int) []batteryRun {
 }
 
 func TestAppendSampleExtendsRunWhilePercentHolds(t *testing.T) {
-	runs := appendBatterySample(nil, 88, false, at(0))
-	runs = appendBatterySample(runs, 88, false, at(1))
-	runs = appendBatterySample(runs, 88, false, at(2))
+	runs, _ := appendBatterySample(nil, 88, false, at(0))
+	runs, _ = appendBatterySample(runs, 88, false, at(1))
+	runs, ev := appendBatterySample(runs, 88, false, at(2))
+
+	if ev != battHeld {
+		t.Errorf("event = %v, want battHeld", ev)
+	}
 
 	if len(runs) != 1 {
 		t.Fatalf("want 1 run while the percent holds, got %d: %+v", len(runs), runs)
@@ -43,9 +47,12 @@ func TestAppendSampleExtendsRunWhilePercentHolds(t *testing.T) {
 }
 
 func TestAppendSampleOpensRunOnPercentChange(t *testing.T) {
-	runs := appendBatterySample(nil, 88, false, at(0))
-	runs = appendBatterySample(runs, 87, false, at(6))
+	runs, _ := appendBatterySample(nil, 88, false, at(0))
+	runs, ev := appendBatterySample(runs, 87, false, at(6))
 
+	if ev != battEdge {
+		t.Errorf("event = %v, want battEdge", ev)
+	}
 	if len(runs) != 2 {
 		t.Fatalf("want 2 runs, got %d", len(runs))
 	}
@@ -71,10 +78,13 @@ func TestAppendSampleResetsHistory(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runs := appendBatterySample(nil, 89, false, at(0))
-			runs = appendBatterySample(runs, 88, false, at(5))
-			runs = appendBatterySample(runs, tc.pct, tc.chg, tc.when)
+			runs, _ := appendBatterySample(nil, 89, false, at(0))
+			runs, _ = appendBatterySample(runs, 88, false, at(5))
+			runs, ev := appendBatterySample(runs, tc.pct, tc.chg, tc.when)
 
+			if ev != battReset {
+				t.Errorf("event = %v, want battReset", ev)
+			}
 			if len(runs) != 1 {
 				t.Fatalf("history must reset to a single run, got %d: %+v", len(runs), runs)
 			}
@@ -127,7 +137,7 @@ func TestMeasuredRateIgnoresWrongDirection(t *testing.T) {
 
 func TestEstimateFallsBackToDatasheet(t *testing.T) {
 	m7010 := findDeviceByID("m7010")
-	est := estimateBattery(m7010, 50, false, runsAt([2]int{0, 50}))
+	est := estimateBattery(m7010, 50, false, &batteryHistory{Runs: runsAt([2]int{0, 50})})
 
 	if est.Source != "typical" {
 		t.Fatalf("source = %q, want typical during warm-up", est.Source)
@@ -146,7 +156,7 @@ func TestEstimateUsesMeasuredRateOnceWarm(t *testing.T) {
 	// 3 percent in 18 min = 10 %/h, i.e. far faster than the 12.5 %/h
 	// datasheet rate — the point being that the measurement wins.
 	runs := runsAt([2]int{0, 90}, [2]int{6, 89}, [2]int{12, 88}, [2]int{18, 87}, [2]int{24, 86})
-	est := estimateBattery(m7010, 86, false, runs)
+	est := estimateBattery(m7010, 86, false, &batteryHistory{Runs: runs})
 
 	if est.Source != "measured" {
 		t.Fatalf("source = %q, want measured", est.Source)
@@ -163,7 +173,7 @@ func TestEstimateChargingHasNoDatasheetFallback(t *testing.T) {
 	// Neither vendor publishes a charge time, so time-to-full must stay
 	// silent until it has been measured.
 	m7010 := findDeviceByID("m7010")
-	cold := estimateBattery(m7010, 50, true, nil)
+	cold := estimateBattery(m7010, 50, true, &batteryHistory{})
 	if cold.known() {
 		t.Errorf("charging estimate = %+v, want unknown before measurement", cold)
 	}
@@ -173,7 +183,7 @@ func TestEstimateChargingHasNoDatasheetFallback(t *testing.T) {
 		t := at(i * 6).Unix()
 		runs = append(runs, batteryRun{Pct: pct, Chg: true, From: t, To: t})
 	}
-	warm := estimateBattery(m7010, 54, true, runs)
+	warm := estimateBattery(m7010, 54, true, &batteryHistory{Runs: runs})
 	if !warm.ToFull || warm.Source != "measured" {
 		t.Fatalf("charging estimate = %+v, want a measured to-full figure", warm)
 	}
@@ -184,10 +194,10 @@ func TestEstimateChargingHasNoDatasheetFallback(t *testing.T) {
 
 func TestEstimateSilentWhenFullOrEmpty(t *testing.T) {
 	m7010 := findDeviceByID("m7010")
-	if est := estimateBattery(m7010, 100, true, nil); est.known() {
+	if est := estimateBattery(m7010, 100, true, &batteryHistory{}); est.known() {
 		t.Errorf("charging at 100%% must not count down, got %+v", est)
 	}
-	if est := estimateBattery(m7010, 0, false, nil); est.known() {
+	if est := estimateBattery(m7010, 0, false, &batteryHistory{}); est.known() {
 		t.Errorf("a 0/absent percent must not estimate, got %+v", est)
 	}
 }
@@ -300,5 +310,221 @@ func TestTooltipOmitsUnknownEstimate(t *testing.T) {
 	}
 	if strings.Contains(tooltip, "·") {
 		t.Errorf("no separator should be left dangling:\n%s", tooltip)
+	}
+}
+
+// --- cross-session learning ---
+
+// observeSeries feeds (minute, percent) readings through the full observe
+// path, i.e. exactly what a series of polls would do.
+func observeSeries(h *batteryHistory, chg bool, pairs ...[2]int) {
+	for _, p := range pairs {
+		h.observe(p[1], chg, at(p[0]))
+	}
+}
+
+func TestObserveBanksEdgeIntervals(t *testing.T) {
+	h := &batteryHistory{}
+	observeSeries(h, false,
+		[2]int{0, 90}, [2]int{6, 89}, [2]int{12, 88}, [2]int{18, 87}, [2]int{24, 86})
+
+	if h.Discharge == nil {
+		t.Fatal("nothing banked")
+	}
+	// Four edges (89..86) yield three banked intervals of 1% / 6 min. The
+	// first percent is skipped: we joined it partway through.
+	if h.Discharge.Pct != 3 || h.Discharge.Obs != 3 {
+		t.Errorf("banked = %+v, want 3 percent over 3 observations", h.Discharge)
+	}
+	// The pooled rate must agree with the in-session edge-anchored rate,
+	// or the two halves of this file disagree about the same window.
+	if got, want := h.Discharge.rate(), measuredRate(h.Runs, false); got < want-0.001 || got > want+0.001 {
+		t.Errorf("pooled rate %v != in-session rate %v", got, want)
+	}
+	if h.Charge != nil {
+		t.Errorf("discharge leaked into the charging pool: %+v", h.Charge)
+	}
+}
+
+func TestObserveDoesNotDoubleCountHeldPercent(t *testing.T) {
+	h := &batteryHistory{}
+	observeSeries(h, false, [2]int{0, 90}, [2]int{6, 89}, [2]int{12, 88})
+	banked := *h.Discharge
+
+	// Same percent, polled repeatedly — no new evidence.
+	observeSeries(h, false, [2]int{13, 88}, [2]int{14, 88}, [2]int{15, 88})
+	if *h.Discharge != banked {
+		t.Errorf("pool moved on a held percent: %+v -> %+v", banked, *h.Discharge)
+	}
+}
+
+func TestLearningSurvivesWindowResets(t *testing.T) {
+	// The point of the whole mechanism: a charger flip or a sleep gap
+	// destroys the measurable window but must not destroy the knowledge.
+	for _, tc := range []struct {
+		name string
+		next func(h *batteryHistory)
+	}{
+		{"sleep gap", func(h *batteryHistory) { h.observe(86, false, at(120)) }},
+		{"charger plugged in", func(h *batteryHistory) { h.observe(86, true, at(30)) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &batteryHistory{}
+			observeSeries(h, false,
+				[2]int{0, 90}, [2]int{6, 89}, [2]int{12, 88}, [2]int{18, 87}, [2]int{24, 86})
+			before := *h.Discharge
+
+			tc.next(h)
+
+			if len(h.Runs) != 1 {
+				t.Errorf("window should have restarted, got %d runs", len(h.Runs))
+			}
+			if h.Banked != nil {
+				t.Error("the interval spanning the discontinuity must not stay pending")
+			}
+			if *h.Discharge != before {
+				t.Errorf("learning lost across the reset: %+v -> %+v", before, *h.Discharge)
+			}
+		})
+	}
+}
+
+func TestBankIgnoresWrongDirection(t *testing.T) {
+	h := &batteryHistory{}
+	// A gauge wobbling upwards while discharging is not discharge evidence.
+	observeSeries(h, false, [2]int{0, 88}, [2]int{6, 89}, [2]int{12, 90})
+	if h.Discharge != nil {
+		t.Errorf("wrong-direction movement was banked: %+v", h.Discharge)
+	}
+}
+
+func TestLearnedRateOutranksDatasheet(t *testing.T) {
+	m7010 := findDeviceByID("m7010")
+	// This unit has actually averaged 20 %/h — a 5 h runtime against the
+	// datasheet's 8 h, which is what an aged cell or a heavier usage
+	// pattern looks like.
+	h := &batteryHistory{Discharge: &batteryLearned{Pct: 20, Hours: 1, Obs: 20}}
+	est := estimateBattery(m7010, 50, false, h)
+
+	if est.Source != "learned" {
+		t.Fatalf("source = %q, want learned", est.Source)
+	}
+	// The datasheet still counts as a weak prior, so the rate lands
+	// between the two: (20+10) / (1 + 10*8/100) = 16.67 %/h.
+	if est.Minutes != 180 {
+		t.Errorf("minutes = %d, want 180 (50%% at 16.67 %%/h)", est.Minutes)
+	}
+	if !strings.Contains(est.Label(), "(avg)") {
+		t.Errorf("label must mark a cross-session average, got %q", est.Label())
+	}
+}
+
+func TestThinEvidenceStillDefersToDatasheet(t *testing.T) {
+	m7010 := findDeviceByID("m7010")
+	// One brief window is not a rate — a couple of percent seen during a
+	// quiet moment would otherwise claim a 40 h battery.
+	h := &batteryHistory{Discharge: &batteryLearned{Pct: 2, Hours: 1, Obs: 2}}
+	if est := estimateBattery(m7010, 50, false, h); est.Source != "typical" {
+		t.Errorf("source = %q, want typical below the evidence threshold", est.Source)
+	}
+}
+
+func TestMeasuredRateOutranksLearned(t *testing.T) {
+	m7010 := findDeviceByID("m7010")
+	h := &batteryHistory{
+		Runs: runsAt([2]int{0, 90}, [2]int{6, 89}, [2]int{12, 88}, [2]int{18, 87}, [2]int{24, 86}),
+		// Wildly different history: what is happening now must win.
+		Discharge: &batteryLearned{Pct: 100, Hours: 1, Obs: 100},
+	}
+	if est := estimateBattery(m7010, 86, false, h); est.Source != "measured" {
+		t.Errorf("source = %q, want measured — the live window beats history", est.Source)
+	}
+}
+
+func TestChargingLearnsWithoutADatasheetPrior(t *testing.T) {
+	m7010 := findDeviceByID("m7010")
+	h := &batteryHistory{Charge: &batteryLearned{Pct: 40, Hours: 1, Obs: 40}}
+	est := estimateBattery(m7010, 50, true, h)
+
+	if est.Source != "learned" || !est.ToFull {
+		t.Fatalf("estimate = %+v, want a learned to-full figure", est)
+	}
+	// No prior to blend, so the pooled 40 %/h is used as-is: 50% to go.
+	if est.Minutes != 75 {
+		t.Errorf("minutes = %d, want 75", est.Minutes)
+	}
+}
+
+func TestLearnedMemoryIsBounded(t *testing.T) {
+	h := &batteryHistory{}
+	// Ten full discharges' worth of evidence at a steady 10 %/h.
+	for i := 0; i < 1000; i++ {
+		h.bank(false, batteryEdge{Pct: 100, T: at(i * 6).Unix()},
+			batteryRun{Pct: 99, From: at(i*6 + 6).Unix()}, at(i*6+6))
+	}
+	if h.Discharge.Pct > batteryLearnMaxPct+1 {
+		t.Errorf("pool grew unbounded: %+v", h.Discharge)
+	}
+	if got := h.Discharge.rate(); got < 9.99 || got > 10.01 {
+		t.Errorf("scaling the pool changed the rate: %v, want 10", got)
+	}
+}
+
+func TestLearningRoundTripsThroughState(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TPLINK_STATE_DIR", dir)
+	d := findDeviceByID("m7010")
+
+	// Session one: one reading every 6 min, as a real poll would deliver.
+	batteryNow = func() time.Time { return at(0) }
+	defer func() { batteryNow = time.Now }()
+	for i, pct := range []int{90, 89, 88, 87, 86, 85, 84, 83} {
+		min := i * 6
+		batteryNow = func() time.Time { return at(min) }
+		batteryRemaining(d, &Status{BatteryPercent: pct})
+	}
+	// Session two, in a brand new process: the file is all it has.
+	st := loadBatteryState()
+	if h := st.Devices["m7010"]; h == nil || h.Discharge == nil || h.Discharge.Obs == 0 {
+		t.Fatalf("learning did not reach disk: %+v", st.Devices)
+	}
+}
+
+func TestSecondSessionStartsFromWhatTheFirstLearned(t *testing.T) {
+	// The whole feature, end to end: a first session that actually
+	// consumed some battery must leave the next cold start better off
+	// than the vendor's datasheet number.
+	dir := t.TempDir()
+	t.Setenv("TPLINK_STATE_DIR", dir)
+	d := findDeviceByID("m7010")
+	defer func() { batteryNow = time.Now }()
+
+	poll := func(min, pct int) batteryEstimate {
+		batteryNow = func() time.Time { return at(min) }
+		return batteryRemaining(d, &Status{BatteryPercent: pct})
+	}
+
+	// Session one: 90% -> 80% in 40 min, i.e. 15 %/h — this unit under
+	// this usage is well short of the 12.5 %/h datasheet rate.
+	if est := poll(0, 90); est.Source != "typical" {
+		t.Fatalf("first ever reading: source = %q, want typical", est.Source)
+	}
+	for i, pct := range []int{89, 88, 87, 86, 85, 84, 83, 82, 81, 80} {
+		poll((i+1)*4, pct)
+	}
+
+	// Two hours later — laptop slept, window unmeasurable, knowledge kept.
+	est := poll(160, 80)
+	if est.Source != "learned" {
+		t.Fatalf("second session: source = %q, want learned", est.Source)
+	}
+	// Pool holds 9 percent over 0.6 h; with the datasheet prior that is
+	// (9+10)/(0.6+0.8) = 13.57 %/h, so 80% has ~5h54m to go — between the
+	// datasheet's optimistic 6h24m and the raw measured 5h20m.
+	if est.Minutes != 354 {
+		t.Errorf("minutes = %d, want 354", est.Minutes)
+	}
+	if want := "~5h54m left (avg)"; est.Label() != want {
+		t.Errorf("label = %q, want %q", est.Label(), want)
 	}
 }

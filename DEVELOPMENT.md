@@ -238,3 +238,55 @@ publishes a charge time, so time-to-full appears only once measured.
 **Caught in review**: appending the estimate to the TUI's battery row
 wrapped it onto a second line — the box is 46 columns. It gets its own
 `Remaining` / `To full` row, and the test asserts the line doesn't wrap.
+
+## Attempt 11 — learning the rate across sessions
+
+**Want**: not to throw away what was measured. Attempt 10 reset the
+window on charger flips and >20 min polling gaps, and a reset dropped
+straight back to the datasheet. Plug the charger in for five minutes and
+an hour of evidence was gone.
+
+**The mistake it encoded**: a reset was treated as meaning two things at
+once — "I cannot measure *across* this discontinuity" (true, the window
+must restart) and "I know nothing about this router" (false after the
+very first session).
+
+**What stuck**: separate the window from the knowledge. Each transition
+is banked, once, into a pooled `(percent, hours)` accumulator per device
+and per direction, which survives every reset. The estimate then degrades
+in three steps — `measured` (this session) → `learned` (this unit's
+average) → `typical` (datasheet).
+
+Details that mattered:
+
+- **Pool the sums, not the rates.** Averaging per-window rates weights a
+  3-minute window like a 3-hour one. Summing percent and hours separately
+  is the correct pooled mean, and it makes the pooled rate over a full
+  window identical to the in-session edge-anchored rate — asserted in the
+  tests, because if those two ever disagree one of them is wrong.
+- **Bank incrementally.** Folding the whole window in on each poll would
+  double count; re-deriving from the run list would lose whatever the
+  12 h/256-entry trim dropped. A stored "last banked edge", cleared on
+  reset, makes each interval count exactly once.
+- **Bound the memory** at ~2 discharges by scaling both sums down
+  together (preserves the rate, makes room for newer evidence). Without
+  it, a battery that ages would be averaged against a year of history.
+- **Keep the datasheet as a weak prior** inside the pool. The first
+  banked window might be a quiet one; without the prior it would swing
+  the estimate wholesale. It washes out as evidence accumulates.
+- **Charging pools separately** and gets no prior — but it now shows
+  time-to-full from the second charge onwards, where before it needed a
+  warm-up every single time.
+
+**Not called battery health.** The learned figure mixes cell ageing with
+how hard the router was worked; a weak signal and five clients drain a
+healthy battery fast. `--json` exposes it as `observed_runtime_hours`
+next to `typical_runtime_hours` for trending, and the README says plainly
+why it is not a health percentage. Doing it properly needs a full-charge
+capacity readout, which neither device exposes.
+
+**Testability fix along the way**: `batteryRemaining` took `time.Now`
+directly, so a test driving the real entry point crowded every reading
+into one second — every interval zero-length, nothing banked, and the
+test failed for a reason that had nothing to do with the logic. `time.Now`
+is now an indirected var.

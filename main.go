@@ -324,17 +324,21 @@ func runJSON() {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	out := struct {
-		Device  string           `json:"device"`
-		Title   string           `json:"title"`
-		Status  *Status          `json:"status"`
-		Battery *batteryEstimate `json:"battery_estimate,omitempty"`
-	}{d.ID, d.Title, status, nil}
+		Device  string             `json:"device"`
+		Title   string             `json:"title"`
+		Status  *Status            `json:"status"`
+		Battery *batteryEstimate   `json:"battery_estimate,omitempty"`
+		Learned *batteryLearnedOut `json:"battery_learned,omitempty"`
+	}{d.ID, d.Title, status, nil, nil}
 	// Derived here rather than in Status, which is strictly what the
 	// device reported. Omitted while the estimate is still unknown so a
 	// script can test for presence instead of a sentinel.
 	if est := batteryRemaining(d, status); est.known() {
 		out.Battery = &est
 	}
+	// What this router has averaged over past sessions, for trending. Only
+	// here: the widget modes have no use for it and re-read the state file.
+	out.Learned = batteryLearnedFor(d)
 	enc.Encode(out)
 }
 
