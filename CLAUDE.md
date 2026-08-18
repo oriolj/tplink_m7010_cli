@@ -7,7 +7,14 @@ Notes for future Claude sessions working on this repo.
 A Go CLI that talks to **two** mobile-Wi-Fi hotspot families over their
 LAN web APIs and renders the state as a Bubble Tea TUI, a waybar JSON
 module, or a noctalia-shell CustomButton widget. Tiny scope — no daemon,
-no caching.
+and no caching of device responses.
+
+The one exception to "no state": `battery.go` keeps a percent history in
+`$XDG_STATE_HOME/tplink-m7010/battery.json`. It has to. Neither device
+reports a remaining time, so the only way to get one is to measure how
+fast the percent moves, and a one-shot process cannot do that from a
+single reading. Everything in that file is disposable — deleting it costs
+one warm-up window.
 
 Supported devices:
 
@@ -72,11 +79,30 @@ gl-sdk4-* package list, and live probing. Key things:
 3. **RSA message > key size → chunk, don't fail.** The sign string
    (~87 bytes) is larger than one 53-byte PKCS1v15 block. phpseclib
    auto-chunks; we mirror that.
-4. **`battery.voltage` is the percent**, not a voltage.
+4. **`battery.voltage` is the percent**, not a voltage. Integer, 1% steps
+   — which is why the remaining-time estimate anchors on transitions
+   rather than samples (see below).
 5. **`signalStrength` is always 0.** Use `rsrp` and map to 0-5 bars
    yourself (`rsrpToSignal`).
 6. **Responses are base64.** Step-1 is base64 JSON; subsequent are
    base64 AES ciphertext. Both look alike — don't confuse them.
+
+### Remaining battery time
+
+1. **Both devices report an integer percent and nothing else** — no
+   current, no voltage, no time. The estimate is derived, so treat
+   `TypicalRuntime` in the device registry as a documented datasheet
+   figure (M7010 8 h, Mudi 7 13.5 h), not a measurement.
+2. **Measure between edges, not samples.** 88% is an interval, not a
+   point: two arbitrary samples 1% apart carry a ±100% rate error.
+   `measuredRate` skips `runs[0]` on purpose — we joined that percent
+   partway through, so its timestamp is when we started looking, not
+   when the percent was entered.
+3. **A poll gap is not slow discharge.** A router that was switched off
+   looks exactly like one barely discharging, and that reading inflates
+   the estimate. Anything over `batteryGapMax` resets the history.
+4. **Don't add a charging bootstrap** without a source: neither vendor
+   publishes a charge time, so time-to-full stays silent until measured.
 
 ### Mudi (GL.iNet GL-E5800)
 
@@ -120,6 +146,12 @@ gl-sdk4-* package list, and live probing. Key things:
 - `crypt.go`    — Pure-Go SHA-256 crypt(3) implementation for the
                   Mudi challenge response. Cross-checked against
                   `openssl passwd -5`.
+- `battery.go`  — Remaining-time estimate. Percent history in
+                  XDG_STATE_HOME, edge-anchored rate, datasheet
+                  fallback while warming up. Read its file header
+                  before changing any constant there: the warm-up
+                  gate and the reset rules are what keep the number
+                  from being confidently wrong.
 - `main.go`     — Flag parsing, mode dispatch (`runTUI`, `runWaybar`,
                   `runNoctalia`, `runJSON`, `runRaw`, `runPower`). All
                   modes go through `pickDevice() + openDevice() +

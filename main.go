@@ -154,7 +154,7 @@ func runWaybar() {
 		})
 		return
 	}
-	text, tooltip, class := formatStatusLine(d, status)
+	text, tooltip, class := formatStatusLine(d, status, batteryRemaining(d, status))
 	enc.Encode(WaybarOutput{
 		Text:    text,
 		Tooltip: tooltip,
@@ -201,7 +201,7 @@ func runNoctalia() {
 		})
 		return
 	}
-	text, tooltip, class := formatStatusLine(d, status)
+	text, tooltip, class := formatStatusLine(d, status, batteryRemaining(d, status))
 	enc.Encode(noctaliaOutput{
 		Text:      text,
 		Tooltip:   tooltip, // formatStatusLine already trims the trailing newline
@@ -211,7 +211,13 @@ func runNoctalia() {
 
 // formatStatusLine builds the shared widget text + tooltip + class string.
 // Both waybar and noctalia drive their styling off the same data.
-func formatStatusLine(d *SupportedDevice, s *Status) (text, tooltip, class string) {
+//
+// The remaining-time estimate is passed in rather than computed here so
+// this stays a pure formatter (it writes a state file — see battery.go).
+// It lands in the tooltip only, never in the bar text: the tile is a
+// glanceable four-field line, and a time that is "typical" until the
+// measurement warms up belongs where the caveat can be read.
+func formatStatusLine(d *SupportedDevice, s *Status, est batteryEstimate) (text, tooltip, class string) {
 	signal := signalBars(s.SignalStrength)
 	dataGB := bytesToGB(s.TotalBytes)
 	limitGB := bytesToGB(s.MonthLimitBytes)
@@ -251,10 +257,14 @@ func formatStatusLine(d *SupportedDevice, s *Status) (text, tooltip, class strin
 	}
 	fmt.Fprintf(&tb, "\n")
 	if s.BatteryCharging {
-		fmt.Fprintf(&tb, "Battery: %d%% (charging)\n", s.BatteryPercent)
+		fmt.Fprintf(&tb, "Battery: %d%% (charging)", s.BatteryPercent)
 	} else {
-		fmt.Fprintf(&tb, "Battery: %d%%\n", s.BatteryPercent)
+		fmt.Fprintf(&tb, "Battery: %d%%", s.BatteryPercent)
 	}
+	if label := est.Label(); label != "" {
+		fmt.Fprintf(&tb, " · %s", label)
+	}
+	fmt.Fprintf(&tb, "\n")
 	fmt.Fprintf(&tb, "Data Used: %.2f GB", dataGB)
 	if limitGB > 0 {
 		fmt.Fprintf(&tb, " / %.0f GB", limitGB)
@@ -313,11 +323,19 @@ func runJSON() {
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	enc.Encode(struct {
-		Device string  `json:"device"`
-		Title  string  `json:"title"`
-		Status *Status `json:"status"`
-	}{d.ID, d.Title, status})
+	out := struct {
+		Device  string           `json:"device"`
+		Title   string           `json:"title"`
+		Status  *Status          `json:"status"`
+		Battery *batteryEstimate `json:"battery_estimate,omitempty"`
+	}{d.ID, d.Title, status, nil}
+	// Derived here rather than in Status, which is strictly what the
+	// device reported. Omitted while the estimate is still unknown so a
+	// script can test for presence instead of a sentinel.
+	if est := batteryRemaining(d, status); est.known() {
+		out.Battery = &est
+	}
+	enc.Encode(out)
 }
 
 // --- Raw dump mode ---
@@ -391,8 +409,9 @@ type model struct {
 	loading bool
 	refresh time.Duration
 
-	lastUpdate time.Time // when status last refreshed successfully
-	rsrpHist   []int     // recent RSRP samples for the sparkline
+	lastUpdate time.Time       // when status last refreshed successfully
+	rsrpHist   []int           // recent RSRP samples for the sparkline
+	battEst    batteryEstimate // remaining battery time (see battery.go)
 
 	// Cross-tick state for deriving throughput on devices that don't
 	// report live speeds (the Mudi only exposes a total-bytes counter).
@@ -488,6 +507,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		now := time.Now()
 		m.lastUpdate = now
 		if s := msg.status; s != nil {
+			// Every successful fetch feeds the shared percent history, so
+			// a TUI left open warms up the estimate for the bar widget too.
+			m.battEst = batteryRemaining(m.device, s)
 			if s.RSRP != 0 {
 				m.rsrpHist = append(m.rsrpHist, s.RSRP)
 				if len(m.rsrpHist) > rsrpHistMax {
@@ -649,7 +671,11 @@ func (m model) View() string {
 	if s.BatteryCharging {
 		charging = " [charging]"
 	}
-	writeRow(&content, "Battery", batStyle, fmt.Sprintf("%s %d%%%s", batBar, s.BatteryPercent, charging))
+	writeRow(&content, "Battery", batStyle,
+		fmt.Sprintf("%s %d%%%s", batBar, s.BatteryPercent, charging))
+	if v := m.battEst.RowValue(); v != "" {
+		writeRow(&content, m.battEst.RowLabel(), batStyle, v)
+	}
 
 	dataGB := bytesToGB(s.TotalBytes)
 	limitGB := bytesToGB(s.MonthLimitBytes)

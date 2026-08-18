@@ -31,11 +31,18 @@ One JSON object on stdout:
 | Field       | Used for                                                      |
 | ----------- | ------------------------------------------------------------- |
 | `text`      | The tile label, e.g. `5G ▅▆▆░░  88%  32.1GB`                  |
-| `tooltip`   | Multi-line detail (connection, signal, battery, data, speed…) |
+| `tooltip`   | Multi-line detail (connection, signal, battery + remaining time, data, speed…) |
 | `textColor` | One of `primary / secondary / tertiary / error / none`        |
 
 The widget also accepts `icon`, `iconColor`, and a legacy `color` field
 — we don't set them today.
+
+The battery line carries the estimated remaining time when one is
+available — `Battery: 56% · ~4h29m left (typical)`, or without the
+`(typical)` marker once the rate has been measured rather than taken
+from the datasheet. It is in the tooltip only, never in `text`: the tile
+is a four-field glance line, and the caveat needs somewhere to be read.
+See the README's "Remaining battery time" for how the number is derived.
 
 States the binary emits:
 

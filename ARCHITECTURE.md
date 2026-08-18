@@ -238,6 +238,34 @@ raw maps excluded). That's the stable scripting interface for anything
 that isn't waybar or the QML-era noctalia CustomButton: a future
 noctalia v5 plugin, eww, polybar, or plain shell scripts.
 
+## Remaining battery time (`battery.go`)
+
+The only stateful component. Every mode calls `batteryRemaining(d, status)`
+after a successful fetch, which does two things in one pass: folds the
+observation into the on-disk history and returns the best estimate
+available.
+
+```
+observation ──► appendBatterySample ──► runs []batteryRun ──► measuredRate
+                (reset on charger flip,                        (skips runs[0],
+                 >20 min gap, ±10% jump)                        needs 3 steps)
+                                                                    │
+                        datasheet TypicalRuntime ◄── no ── warm? ────┤
+                                    │                               │ yes
+                                    ▼                               ▼
+                              "(typical)"                      measured rate
+                                    └────────► batteryEstimate ◄────┘
+```
+
+A `batteryRun` is one span of a held percent: `From` is the edge (first
+sighting, what the rate is measured against), `To` is the newest sample
+still reading it (what gap detection needs). That shape is why the file
+stays small — a full discharge is ~100 entries, not one per poll.
+
+Rendering is split by surface: `Label()` for the widget tooltips,
+`RowLabel()`/`RowValue()` for the TUI (the 46-column box wraps if the
+estimate is appended to the battery row). The bar text never carries it.
+
 ## Adding a new device — checklist
 
 The interface is small on purpose; everything protocol-specific stays in
@@ -258,7 +286,10 @@ one new file. In order:
    autodetect section above for why.
 4. **Registry entry in `supportedDevices`** (`device.go`): ID, Title,
    DefaultAddr, `AddrEnvs` + `PasswordEnvs` (primary spelling first),
-   `PasswordPath` under `~/.config/`, `New`, `Probe`.
+   `PasswordPath` under `~/.config/`, `New`, `Probe`, and
+   `TypicalRuntime` (the vendor's published battery life — it bootstraps
+   the remaining-time estimate; omit it and the device simply shows no
+   time until the rate has been measured).
 5. **Tests** — a fake-device test in the style of
    `m7010_envelope_test.go` / `mudi_envelope_test.go` (httptest server
    speaking the server side of the protocol), plus unit tests for any

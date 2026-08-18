@@ -60,13 +60,13 @@ func TestViewDerivedRateWhenNoSplitSpeeds(t *testing.T) {
 
 func TestFormatStatusLineSpeed(t *testing.T) {
 	s := &Status{NetworkType: "4G", RxSpeed: "2964", TxSpeed: "2202"}
-	_, tooltip, _ := formatStatusLine(&supportedDevices[0], s)
+	_, tooltip, _ := formatStatusLine(&supportedDevices[0], s, batteryEstimate{})
 	if !strings.Contains(tooltip, "Speed: ↓ 2.9 KB/s  ↑ 2.2 KB/s") {
 		t.Errorf("tooltip missing speed line:\n%s", tooltip)
 	}
 
 	// No speeds reported (Mudi): no speed line at all.
-	_, tooltip, _ = formatStatusLine(&supportedDevices[1], &Status{NetworkType: "5G"})
+	_, tooltip, _ = formatStatusLine(&supportedDevices[1], &Status{NetworkType: "5G"}, batteryEstimate{})
 	if strings.Contains(tooltip, "Speed:") {
 		t.Errorf("tooltip has spurious speed line:\n%s", tooltip)
 	}
@@ -116,5 +116,31 @@ func TestViewStaleDataOnError(t *testing.T) {
 	out = m.View()
 	if !strings.Contains(out, "Error: connection refused") || !strings.Contains(out, "r = retry") {
 		t.Errorf("View() missing full-screen error; got:\n%s", out)
+	}
+}
+
+func TestViewShowsBatteryEstimate(t *testing.T) {
+	m := model{
+		device:     &supportedDevices[0],
+		refresh:    10 * time.Second,
+		status:     &Status{NetworkType: "4G", BatteryPercent: 56},
+		battEst:    batteryEstimate{Minutes: 336, Text: "5h36m", Source: "measured"},
+		lastUpdate: time.Now(),
+	}
+	out := m.View()
+	if !strings.Contains(out, "Remaining") || !strings.Contains(out, "~5h36m") {
+		t.Errorf("View() missing the remaining-time row; got:\n%s", out)
+	}
+	// The 46-column box must not wrap the row onto a second line.
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "~5h36m") && !strings.Contains(line, "Remaining") {
+			t.Errorf("estimate wrapped away from its label; got:\n%s", out)
+		}
+	}
+
+	// Warm-up: no estimate yet, so the battery row stays as it was.
+	m.battEst = batteryEstimate{}
+	if out := m.View(); strings.Contains(out, "Remaining") {
+		t.Errorf("View() shows a placeholder estimate; got:\n%s", out)
 	}
 }

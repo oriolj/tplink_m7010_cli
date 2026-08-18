@@ -189,3 +189,52 @@ side of each protocol in `httptest` works better:
 One latent bug surfaced while wiring this up: `dialWS` hardcoded port
 80, so `--addr host:port` worked for `/rpc` but silently broke the WS
 path (and httptest servers). Fixed to honour an explicit port.
+
+## Attempt 10 — remaining battery time from a quantised percent
+
+**Want**: `hh:mm` remaining, in the CLI and in the bar widget's popup.
+
+**Problem**: neither device reports one. The M7010 gives
+`battery.voltage` (a percent despite the name) plus a charging flag; the
+Mudi gives `system.mcu.charge_percent` plus `charging_status`. No
+current, no voltage, no time. Both are integers, 1% steps. And the
+binary is one-shot, so there is no history to differentiate.
+
+**What didn't work, on paper**:
+
+- *Rate between two arbitrary samples.* A reading of 88% is an interval,
+  not a point. Two samples 1% apart could be 1.01% or 2.99% of real
+  drop — a ±100% error on the rate, which is worse than useless when it
+  is rendered as a confident `4h12m`.
+- *In-process history only (TUI).* At ~5 min per percent, a TUI session
+  would have to stay open ~20 min before showing anything, and the
+  noctalia poll — a fresh process every 30s — would never show anything
+  at all. That is the surface that actually wanted the feature.
+
+**What stuck**:
+
+1. **A percent history in `$XDG_STATE_HOME/tplink-m7010/battery.json`.**
+   Stored as runs (one entry per distinct percent, with first-seen and
+   last-seen timestamps) rather than one entry per poll, so a full
+   discharge is ~100 entries instead of ~1200.
+2. **Edge anchoring.** The rate is measured between the instants the
+   percent *changed*, where the drop is exactly N percent and the only
+   residual error is the poll interval. `runs[0]` is skipped: we joined
+   that percent partway through.
+3. **A warm-up gate of 3 percent steps** (~20 min), because one step is
+   a sample size of one.
+4. **A datasheet bootstrap** so the line is useful immediately: 8 h for
+   the M7010 (2000 mAh, "8 h of 4G sharing"), 13.5 h for the Mudi 7
+   (5380 mAh). Labelled `(typical)` in the UI — a guess that looks like
+   a measurement is the failure mode worth engineering against.
+5. **Continuity resets** on charger flips, >20 min polling gaps, and
+   double-digit jumps. The gap rule matters most: a router that was
+   switched off is indistinguishable from one discharging very slowly,
+   and that reading inflates the estimate.
+
+**Deliberately not done**: a charging bootstrap. Neither vendor
+publishes a charge time, so time-to-full appears only once measured.
+
+**Caught in review**: appending the estimate to the TUI's battery row
+wrapped it onto a second line — the box is 46 columns. It gets its own
+`Remaining` / `To full` row, and the test asserts the line doesn't wrap.

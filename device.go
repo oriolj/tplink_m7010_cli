@@ -38,7 +38,11 @@ type SupportedDevice struct {
 	AddrEnvs     []string // env vars consulted in order
 	PasswordEnvs []string
 	PasswordPath string // path under $XDG_CONFIG_HOME
-	New          func(addr string, debug bool) Device
+	// TypicalRuntime is the vendor's published battery life, used only to
+	// bootstrap the remaining-time estimate before enough percent steps
+	// have been observed to measure the real rate (see battery.go).
+	TypicalRuntime time.Duration
+	New            func(addr string, debug bool) Device
 	// Probe cheaply confirms addr speaks this device's protocol (an
 	// unauthenticated hello/challenge). Used by autodetect only.
 	Probe func(addr string, timeout time.Duration) bool
@@ -52,6 +56,8 @@ var supportedDevices = []SupportedDevice{
 		AddrEnvs:     []string{"M7010_ADDR", "TPLINK_ADDR"},
 		PasswordEnvs: []string{"M7010_PASS", "TPLINK_PASS"},
 		PasswordPath: "tplink-m7010/password",
+		// Datasheet: 2000 mAh, "8 h of 4G sharing" (480 h standby).
+		TypicalRuntime: 8 * time.Hour,
 		New: func(addr string, debug bool) Device {
 			return NewClient(addr, debug)
 		},
@@ -64,6 +70,8 @@ var supportedDevices = []SupportedDevice{
 		AddrEnvs:     []string{"MUDI_ADDR", "GLINET_ADDR"},
 		PasswordEnvs: []string{"MUDI_PASS", "GLINET_PASS"},
 		PasswordPath: "gl-e5800/password",
+		// Datasheet: 5380 mAh, "up to 13.5 h".
+		TypicalRuntime: 13*time.Hour + 30*time.Minute,
 		New: func(addr string, debug bool) Device {
 			return NewMudiClient(addr, debug)
 		},

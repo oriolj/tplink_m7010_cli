@@ -25,7 +25,8 @@ Both devices surface the same set of metrics (where available):
 
 - Connection type, operator name, LTE band
 - Signal strength (RSRP → bars when the firmware reports `signalStrength: 0`)
-- Battery percent + charging state
+- Battery percent + charging state, plus an **estimated remaining time**
+  (see "Remaining battery time" below)
 - Data usage and monthly limit
 - WAN IPv4, connected device count
 - Power off + reboot
@@ -112,6 +113,44 @@ make install-waybar     # drops the waybar wrapper script in ~/.config/waybar/sc
 Other useful targets: `make build`, `make run`, `make raw`, `make clean`,
 `make test`, `make vet`, `make tidy`.
 
+## Remaining battery time
+
+Neither router reports a time — only an integer percent and a charging
+flag. The remaining time is therefore derived from how fast that percent
+moves, which needs history, which a one-shot CLI does not have. So this is
+the single piece of state the tool keeps:
+
+```
+$XDG_STATE_HOME/tplink-m7010/battery.json   # ~/.local/state/... by default
+```
+
+It holds one entry per distinct percent seen (per device), which is a few
+KB at most. Delete it freely — you lose the current estimate, nothing else.
+`TPLINK_STATE_DIR` overrides the location.
+
+How the number is arrived at:
+
+- **Edges, not samples.** A reading of 88% says nothing about where inside
+  that percent you are, so the rate is measured between the *instants the
+  percent changed*. Between two such edges the drop is exactly N percent
+  and the only error left is the poll interval.
+- **A warm-up gate.** One percent step is a sample size of one, so the
+  measurement is not trusted until 3 steps have been observed (~20 min at
+  a typical rate). Until then the estimate falls back to the model's
+  datasheet runtime — 8 h for the M7010, 13.5 h for the Mudi 7 — and is
+  labelled **`(typical)`** so a guess never reads as a measurement.
+- **Continuity checks.** The history resets when the charger is plugged or
+  unplugged, when polling has been silent for over 20 min (a router that
+  was *off* looks identical to one discharging very slowly, and that
+  reading inflates the estimate), and on any double-digit jump.
+- **Charging** shows time-to-full, but only once measured: neither vendor
+  publishes a charge time, so there is no datasheet bootstrap for it.
+
+Where it shows: the TUI dashboard as its own `Remaining` / `To full` row,
+the waybar and noctalia **tooltips**, and `--json` as `battery_estimate`.
+Deliberately **not** on the bar tile itself, which stays the glanceable
+four-field line.
+
 ## Battery-friendly behaviour
 
 This binary is meant to run on the host laptop on every waybar tick (30s
@@ -182,6 +221,8 @@ specific landmines.
 - `mudi.go`     — GL.iNet Mudi (GL-E5800) JSON-RPC client
 - `ws.go`       — Minimal WebSocket client for the Mudi's `/ws` event stream
 - `crypt.go`    — Pure-Go SHA-256 crypt(3) for the GL.iNet challenge/response
+- `battery.go`  — Remaining-time estimate: percent history, edge-anchored
+  rate, datasheet fallback
 - `*_test.go`   — Unit tests: pure helpers, WS frames, probes, and full
   fake-device envelope tests for both protocols (`make test`)
 - `Makefile`    — build, install, test, waybar integration
