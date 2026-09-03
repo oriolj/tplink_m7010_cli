@@ -573,6 +573,12 @@ func networkTypeStr(t int) string {
 	case 3:
 		return "4G"
 	case 4:
+		return "3G (TD-SCDMA)"
+	case 5:
+		return "2G (CDMA1x)"
+	case 6:
+		return "3G (CDMA EV-DO)"
+	case 7:
 		return "4G+"
 	default:
 		return fmt.Sprintf("Unknown(%d)", t)
