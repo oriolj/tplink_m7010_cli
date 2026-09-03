@@ -30,8 +30,15 @@ func TestNetworkTypeStr(t *testing.T) {
 		in   int
 		want string
 	}{
-		{0, "No Service"}, {1, "2G"}, {2, "3G"}, {3, "4G"}, {4, "4G+"},
-		{7, "Unknown(7)"},
+		{0, "No Service"},
+		{1, "2G"},
+		{2, "3G"},
+		{3, "4G"},
+		{4, "3G (TD-SCDMA)"},
+		{5, "2G (CDMA1x)"},
+		{6, "3G (CDMA EV-DO)"},
+		{7, "4G+"},
+		{99, "Unknown(99)"},
 	}
 	for _, c := range cases {
 		if got := networkTypeStr(c.in); got != c.want {

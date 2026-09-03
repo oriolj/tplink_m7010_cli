@@ -141,7 +141,8 @@ on the M7010 but likely share the convention.
   "battery":    {"connected":true, "charging":false, "voltage":93},
   "wan": {
     "connectStatus":4, "ipv4":"5.205.144.6",
-    "networkType":3,      // 0=NoSvc, 1=2G, 2=3G, 3=4G, 4=4G+
+    "networkType":3,      // 0=NoSvc, 1=GSM, 2=WCDMA, 3=LTE, 4=TD-SCDMA,
+                          // 5=CDMA1x, 6=CDMA EV-DO, 7=LTE+
     "signalStrength":0,   // always 0 — use rsrp instead
     "totalStatistics":"14473800628.000000",
     "dailyStatistics":"42744727.000000",
