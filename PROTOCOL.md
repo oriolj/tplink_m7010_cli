@@ -2,6 +2,8 @@
 
 This documents what we figured out while making `tplink-m7010` work against a
 real device (firmware `3.0.3 Build 250814 Rel.1021n`, HW `M7010(EU) v3.2`).
+The same envelope is confirmed on an M7450 running firmware
+`3.0.3 Build 251119 Rel.1012n`.
 Much of this is undocumented; the few resources on the open internet target
 the M7350 or M7200 and partially differ from the M7010.
 

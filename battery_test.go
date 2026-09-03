@@ -151,6 +151,14 @@ func TestEstimateFallsBackToDatasheet(t *testing.T) {
 	}
 }
 
+func TestM7450EstimateUsesOwnDatasheetRuntime(t *testing.T) {
+	m7450 := findDeviceByID("m7450")
+	est := estimateBattery(m7450, 50, false, &batteryHistory{})
+	if est.Source != "typical" || est.Minutes != 450 {
+		t.Errorf("M7450 50%% estimate = %+v, want 7h30m typical", est)
+	}
+}
+
 func TestEstimateUsesMeasuredRateOnceWarm(t *testing.T) {
 	m7010 := findDeviceByID("m7010")
 	// 3 percent in 18 min = 10 %/h, i.e. far faster than the 12.5 %/h
@@ -225,14 +233,15 @@ func TestBatteryStateRoundTripPerDevice(t *testing.T) {
 
 	st := loadBatteryState()
 	st.Devices["m7010"] = &batteryHistory{Runs: runsAt([2]int{0, 88})}
+	st.Devices["m7450"] = &batteryHistory{Runs: runsAt([2]int{0, 65})}
 	st.Devices["mudi"] = &batteryHistory{Runs: runsAt([2]int{0, 42})}
 	saveBatteryState(st)
 
 	got := loadBatteryState()
-	if len(got.Devices) != 2 {
-		t.Fatalf("want both devices kept, got %+v", got.Devices)
+	if len(got.Devices) != 3 {
+		t.Fatalf("want all three devices kept, got %+v", got.Devices)
 	}
-	if got.Devices["m7010"].Runs[0].Pct != 88 || got.Devices["mudi"].Runs[0].Pct != 42 {
+	if got.Devices["m7010"].Runs[0].Pct != 88 || got.Devices["m7450"].Runs[0].Pct != 65 || got.Devices["mudi"].Runs[0].Pct != 42 {
 		t.Errorf("histories crossed over: %+v", got.Devices)
 	}
 

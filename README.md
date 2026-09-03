@@ -3,16 +3,17 @@
 Go tool to query a mobile Wi-Fi hotspot and display its state as a Bubble Tea
 TUI, a waybar JSON module, or a noctalia-shell CustomButton widget.
 
-Despite the name, the binary now supports **two router families** with the
+Despite the name, the binary supports three hotspot models with the
 same code:
 
 | Family             | Model        | Default IP     | Wire format                       |
 | ------------------ | ------------ | -------------- | --------------------------------- |
 | TP-Link            | M7010        | `192.168.0.1`  | AES-128-CBC + RSA-PKCS1v15 envelope |
+| TP-Link            | M7450        | `192.168.0.1`  | AES-128-CBC + RSA-PKCS1v15 envelope |
 | GL.iNet (OpenWrt)  | Mudi GL-E5800 | `192.168.8.1` | JSON-RPC with SHA-256-crypt + sid |
 
 The same binary autodetects which device is on the LAN — it prefers the
-default-gateway match and falls back to probing both addresses in parallel.
+default-gateway match and falls back to probing the known addresses in parallel.
 Both signals are confirmed with a cheap unauthenticated **protocol probe**
 (the M7010 hello / the Mudi challenge), so a home router that happens to
 live at 192.168.0.1 is not mistaken for a hotspot. If neither hotspot is
@@ -21,7 +22,7 @@ battery isn't burned on doomed retries.
 
 ## Features
 
-Both devices surface the same set of metrics (where available):
+All devices surface the same set of metrics (where available):
 
 - Connection type, operator name, LTE band
 - Signal strength (RSRP → bars when the firmware reports `signalStrength: 0`)
@@ -58,7 +59,7 @@ The TUI adds a few things the widgets don't show:
 ## Flags
 
 ```
---device    m7010 | mudi   (default: autodetect via default gateway, then TCP probe)
+--device    m7010 | m7450 | mudi   (default: autodetect via default gateway, then protocol probe)
 --addr      router IP (overrides per-device default)
 --pass      admin password (overrides env var and password file)
 --waybar    waybar JSON mode
@@ -86,14 +87,19 @@ The TUI adds a few things the widgets don't show:
 Each device looks for its password in this order:
 
 1. **`--pass` flag** — fine for one-off debugging, visible in `ps`.
-2. **Environment variable** — `M7010_PASS` or `MUDI_PASS` (or `TPLINK_PASS`
-   / `GLINET_PASS` — all four are recognised, pick whichever you like).
+2. **Environment variable** — `M7010_PASS`, `M7450_PASS`, or `MUDI_PASS`
+   (the family aliases `TPLINK_PASS` / `GLINET_PASS` also work).
 3. **Password file** under `$XDG_CONFIG_HOME` (default `~/.config`):
 
    ```
    ~/.config/tplink-m7010/password   # TP-Link M7010
+   ~/.config/tplink-m7450/password   # TP-Link M7450
    ~/.config/gl-e5800/password       # GL.iNet Mudi GL-E5800
    ```
+
+   M7450 also falls back to the M7010 password file for compatibility
+   with installations that used the shared TP-Link protocol before the
+   model became a distinct device ID.
 
    `make install` prints a hint if neither file exists.
 
@@ -143,7 +149,8 @@ How the number is arrived at:
   "what this unit actually averages", not a vendor claim — labelled
   **`(avg)`**.
 - **The datasheet is the last resort**, used only before anything has
-  been learned: 8 h for the M7010, 13.5 h for the Mudi 7. Labelled
+  been learned: 8 h for the M7010, 15 h for the M7450, and 13.5 h for
+  the Mudi 7. Labelled
   **`(typical)`** so a guess never reads as a measurement. It also stays
   on as a weak prior inside the pool, so one unusually idle session
   cannot swing the estimate wholesale.
@@ -202,12 +209,13 @@ keep it cheap:
   noctalia hide the module.
 
 If you also want to skip autodetect entirely (e.g. you only ever use one
-router), pass `--device m7010` or `--device mudi` from your waybar wrapper.
+router), pass `--device m7010`, `--device m7450`, or `--device mudi` from
+your waybar wrapper.
 
 Two related notes:
 
-- **Address overrides via env** (`M7010_ADDR` / `MUDI_ADDR` / `TPLINK_ADDR`
-  / `GLINET_ADDR`) are honoured by autodetect too — the gateway match and
+- **Address overrides via env** (`M7010_ADDR` / `M7450_ADDR` / `MUDI_ADDR`
+  / `TPLINK_ADDR` / `GLINET_ADDR`) are honoured by autodetect too — the gateway match and
   the probe both use the resolved address, not just the factory default.
 - **Widget modes don't log out** (saves a round-trip per tick; the router
   ages sessions out on its own). On the M7010, which allows one active web

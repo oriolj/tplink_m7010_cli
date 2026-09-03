@@ -4,7 +4,7 @@ Notes for future Claude sessions working on this repo.
 
 ## What this is
 
-A Go CLI that talks to **two** mobile-Wi-Fi hotspot families over their
+A Go CLI that talks to three mobile-Wi-Fi hotspot models over their
 LAN web APIs and renders the state as a Bubble Tea TUI, a waybar JSON
 module, or a noctalia-shell CustomButton widget. Tiny scope — no daemon,
 and no caching of device responses.
@@ -30,6 +30,7 @@ Supported devices:
 | ID      | Model               | Default IP    | Transport                       |
 | ------- | ------------------- | ------------- | ------------------------------- |
 | `m7010` | TP-Link M7010       | `192.168.0.1` | undocumented AES+RSA envelope   |
+| `m7450` | TP-Link M7450       | `192.168.0.1` | same AES+RSA envelope as M7010  |
 | `mudi`  | GL.iNet Mudi GL-E5800 | `192.168.8.1` | OpenWrt JSON-RPC at `/rpc`     |
 
 Same binary; the right protocol is picked by autodetect (default-gateway
@@ -40,10 +41,11 @@ unauthenticated *protocol* probe, see `Probe` in `device.go`) or via
 Passwords come from one of:
 
 - `--pass` flag
-- `M7010_PASS` / `MUDI_PASS` env vars (or `TPLINK_PASS` / `GLINET_PASS` —
-  all four are accepted, none is preferred)
-- `$XDG_CONFIG_HOME/tplink-m7010/password` or `$XDG_CONFIG_HOME/gl-e5800/password`
-  (both are first-class — pick whichever path matches the device you have)
+- `M7010_PASS` / `M7450_PASS` / `MUDI_PASS` env vars (or the family aliases
+  `TPLINK_PASS` / `GLINET_PASS`)
+- the matching password file under `$XDG_CONFIG_HOME`: `tplink-m7010/password`,
+  `tplink-m7450/password`, or `gl-e5800/password`. M7450 also falls back to
+  the M7010 path for compatibility.
 
 `--waybar` / `--noctalia` modes emit an **empty JSON object** when no
 supported router is reachable so the widget collapses, without paying a
@@ -101,7 +103,7 @@ gl-sdk4-* package list, and live probing. Key things:
 1. **Both devices report an integer percent and nothing else** — no
    current, no voltage, no time. The estimate is derived, so treat
    `TypicalRuntime` in the device registry as a documented datasheet
-   figure (M7010 8 h, Mudi 7 13.5 h), not a measurement.
+   figure (M7010 8 h, M7450 15 h, Mudi 7 13.5 h), not a measurement.
 2. **Measure between edges, not samples.** 88% is an interval, not a
    point: two arbitrary samples 1% apart carry a ±100% rate error.
    `measuredRate` skips `runs[0]` on purpose — we joined that percent

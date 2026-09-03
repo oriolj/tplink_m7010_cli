@@ -11,7 +11,7 @@ import (
 // View is pure, so the dashboard states can be rendered offline.
 func TestViewRendersDashboard(t *testing.T) {
 	m := model{
-		device:  &supportedDevices[0],
+		device:  findDeviceByID("m7010"),
 		refresh: 10 * time.Second,
 		status: &Status{
 			NetworkType:     "4G",
@@ -46,7 +46,7 @@ func TestViewRendersDashboard(t *testing.T) {
 
 func TestViewDerivedRateWhenNoSplitSpeeds(t *testing.T) {
 	m := model{
-		device:      &supportedDevices[1],
+		device:      findDeviceByID("mudi"),
 		refresh:     10 * time.Second,
 		status:      &Status{NetworkType: "5G", TotalBytes: 1 << 30},
 		derivedRate: 1.5 * (1 << 20),
@@ -60,13 +60,13 @@ func TestViewDerivedRateWhenNoSplitSpeeds(t *testing.T) {
 
 func TestFormatStatusLineSpeed(t *testing.T) {
 	s := &Status{NetworkType: "4G", RxSpeed: "2964", TxSpeed: "2202"}
-	_, tooltip, _ := formatStatusLine(&supportedDevices[0], s, batteryEstimate{})
+	_, tooltip, _ := formatStatusLine(findDeviceByID("m7010"), s, batteryEstimate{})
 	if !strings.Contains(tooltip, "Speed: ↓ 2.9 KB/s  ↑ 2.2 KB/s") {
 		t.Errorf("tooltip missing speed line:\n%s", tooltip)
 	}
 
 	// No speeds reported (Mudi): no speed line at all.
-	_, tooltip, _ = formatStatusLine(&supportedDevices[1], &Status{NetworkType: "5G"}, batteryEstimate{})
+	_, tooltip, _ = formatStatusLine(findDeviceByID("mudi"), &Status{NetworkType: "5G"}, batteryEstimate{})
 	if strings.Contains(tooltip, "Speed:") {
 		t.Errorf("tooltip has spurious speed line:\n%s", tooltip)
 	}
@@ -96,7 +96,7 @@ func TestStatusJSONShape(t *testing.T) {
 
 func TestViewStaleDataOnError(t *testing.T) {
 	m := model{
-		device:     &supportedDevices[1],
+		device:     findDeviceByID("mudi"),
 		refresh:    10 * time.Second,
 		status:     &Status{NetworkType: "5G", BatteryPercent: 50},
 		err:        errors.New("connection refused"),
@@ -121,7 +121,7 @@ func TestViewStaleDataOnError(t *testing.T) {
 
 func TestViewShowsBatteryEstimate(t *testing.T) {
 	m := model{
-		device:     &supportedDevices[0],
+		device:     findDeviceByID("m7010"),
 		refresh:    10 * time.Second,
 		status:     &Status{NetworkType: "4G", BatteryPercent: 56},
 		battEst:    batteryEstimate{Minutes: 336, Text: "5h36m", Source: "measured"},

@@ -154,6 +154,7 @@ func runWaybar() {
 		})
 		return
 	}
+	d = refineDevice(d, status)
 	text, tooltip, class := formatStatusLine(d, status, batteryRemaining(d, status))
 	enc.Encode(WaybarOutput{
 		Text:    text,
@@ -201,6 +202,7 @@ func runNoctalia() {
 		})
 		return
 	}
+	d = refineDevice(d, status)
 	text, tooltip, class := formatStatusLine(d, status, batteryRemaining(d, status))
 	enc.Encode(noctaliaOutput{
 		Text:      text,
@@ -321,6 +323,7 @@ func runJSON() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	d = refineDevice(d, status)
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	out := struct {
@@ -355,6 +358,7 @@ func runRaw() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	d = refineDevice(d, status)
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	fmt.Printf("=== %s — Status ===\n", d.Title)
@@ -433,6 +437,7 @@ const rsrpHistMax = 28
 
 type statusMsg struct {
 	status *Status
+	device *SupportedDevice
 	err    error
 }
 
@@ -458,7 +463,7 @@ func (m model) Init() tea.Cmd {
 func fetchCmdFor(d *SupportedDevice) tea.Cmd {
 	return func() tea.Msg {
 		s, err := tuiFetch(d)
-		return statusMsg{status: s, err: err}
+		return statusMsg{status: s, device: refineDevice(d, s), err: err}
 	}
 }
 
@@ -508,6 +513,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.err = nil
 		m.status = msg.status
+		m.device = msg.device
 		now := time.Now()
 		m.lastUpdate = now
 		if s := msg.status; s != nil {

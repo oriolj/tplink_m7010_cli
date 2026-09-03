@@ -32,12 +32,12 @@ type Device interface {
 }
 
 type SupportedDevice struct {
-	ID           string // CLI alias: "m7010" / "mudi"
-	Title        string
-	DefaultAddr  string
-	AddrEnvs     []string // env vars consulted in order
-	PasswordEnvs []string
-	PasswordPath string // path under $XDG_CONFIG_HOME
+	ID            string // CLI alias: "m7010" / "m7450" / "mudi"
+	Title         string
+	DefaultAddr   string
+	AddrEnvs      []string // env vars consulted in order
+	PasswordEnvs  []string
+	PasswordPaths []string // paths under $XDG_CONFIG_HOME, in preference order
 	// TypicalRuntime is the vendor's published battery life, used only to
 	// bootstrap the remaining-time estimate before enough percent steps
 	// have been observed to measure the real rate (see battery.go).
@@ -50,12 +50,12 @@ type SupportedDevice struct {
 
 var supportedDevices = []SupportedDevice{
 	{
-		ID:           "m7010",
-		Title:        "TP-Link M7010",
-		DefaultAddr:  "192.168.0.1",
-		AddrEnvs:     []string{"M7010_ADDR", "TPLINK_ADDR"},
-		PasswordEnvs: []string{"M7010_PASS", "TPLINK_PASS"},
-		PasswordPath: "tplink-m7010/password",
+		ID:            "m7010",
+		Title:         "TP-Link M7010",
+		DefaultAddr:   "192.168.0.1",
+		AddrEnvs:      []string{"M7010_ADDR", "TPLINK_ADDR"},
+		PasswordEnvs:  []string{"M7010_PASS", "TPLINK_PASS"},
+		PasswordPaths: []string{"tplink-m7010/password"},
 		// Datasheet: 2000 mAh, "8 h of 4G sharing" (480 h standby).
 		TypicalRuntime: 8 * time.Hour,
 		New: func(addr string, debug bool) Device {
@@ -64,12 +64,25 @@ var supportedDevices = []SupportedDevice{
 		Probe: probeM7010,
 	},
 	{
-		ID:           "mudi",
-		Title:        "GL.iNet Mudi (GL-E5800)",
-		DefaultAddr:  "192.168.8.1",
-		AddrEnvs:     []string{"MUDI_ADDR", "GLINET_ADDR"},
-		PasswordEnvs: []string{"MUDI_PASS", "GLINET_PASS"},
-		PasswordPath: "gl-e5800/password",
+		ID:             "m7450",
+		Title:          "TP-Link M7450",
+		DefaultAddr:    "192.168.0.1",
+		AddrEnvs:       []string{"M7450_ADDR", "TPLINK_ADDR", "M7010_ADDR"},
+		PasswordEnvs:   []string{"M7450_PASS", "TPLINK_PASS", "M7010_PASS"},
+		PasswordPaths:  []string{"tplink-m7450/password", "tplink-m7010/password"},
+		TypicalRuntime: 15 * time.Hour,
+		New: func(addr string, debug bool) Device {
+			return NewClient(addr, debug)
+		},
+		Probe: probeM7010,
+	},
+	{
+		ID:            "mudi",
+		Title:         "GL.iNet Mudi (GL-E5800)",
+		DefaultAddr:   "192.168.8.1",
+		AddrEnvs:      []string{"MUDI_ADDR", "GLINET_ADDR"},
+		PasswordEnvs:  []string{"MUDI_PASS", "GLINET_PASS"},
+		PasswordPaths: []string{"gl-e5800/password"},
 		// Datasheet: 5380 mAh, "up to 13.5 h".
 		TypicalRuntime: 13*time.Hour + 30*time.Minute,
 		New: func(addr string, debug bool) Device {
@@ -86,6 +99,24 @@ func findDeviceByID(id string) *SupportedDevice {
 		}
 	}
 	return nil
+}
+
+// refineDevice uses authenticated status data to distinguish models that
+// share an address and unauthenticated protocol. The M7010 and M7450 both
+// answer the same hello at 192.168.0.1, so autodetect initially selects the
+// protocol-family entry and becomes model-specific after the first Fetch.
+func refineDevice(d *SupportedDevice, s *Status) *SupportedDevice {
+	if d == nil || s == nil || (d.ID != "m7010" && d.ID != "m7450") {
+		return d
+	}
+	switch strings.ToUpper(strings.TrimSpace(s.Model)) {
+	case "M7010":
+		return findDeviceByID("m7010")
+	case "M7450":
+		return findDeviceByID("m7450")
+	default:
+		return d
+	}
 }
 
 // resolveAddr: explicit flag > env vars (in registration order) > default.
@@ -112,7 +143,12 @@ func resolvePassword(d *SupportedDevice, flagPass string) string {
 			return v
 		}
 	}
-	return readPasswordFileAt(d.PasswordPath)
+	for _, path := range d.PasswordPaths {
+		if pass := readPasswordFileAt(path); pass != "" {
+			return pass
+		}
+	}
+	return ""
 }
 
 func readPasswordFileAt(rel string) string {
@@ -233,8 +269,12 @@ func openDevice(d *SupportedDevice, flagAddr, flagPass string, debug bool) (Devi
 	addr := resolveAddr(d, flagAddr)
 	pass := resolvePassword(d, flagPass)
 	if pass == "" {
-		return nil, fmt.Errorf("no password for %s (try env %s or %s/%s)",
-			d.Title, d.PasswordEnvs[0], configDirDisplay(), d.PasswordPath)
+		passwordPath := "password file"
+		if len(d.PasswordPaths) > 0 {
+			passwordPath = filepath.Join(configDirDisplay(), d.PasswordPaths[0])
+		}
+		return nil, fmt.Errorf("no password for %s (try env %s or %s)",
+			d.Title, d.PasswordEnvs[0], passwordPath)
 	}
 	dev := d.New(addr, debug)
 	if err := dev.Connect(pass); err != nil {

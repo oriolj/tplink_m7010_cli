@@ -2,6 +2,7 @@ BINARY       := tplink-m7010
 PREFIX       ?= $(HOME)/.local
 BINDIR       := $(PREFIX)/bin
 CONFDIR_M7010:= $(HOME)/.config/tplink-m7010
+CONFDIR_M7450:= $(HOME)/.config/tplink-m7450
 CONFDIR_MUDI := $(HOME)/.config/gl-e5800
 WAYBAR_DIR   := $(HOME)/.config/waybar
 GO           ?= go
@@ -46,10 +47,11 @@ install: build
 	install -d $(BINDIR)
 	install -m755 $(BINARY) $(BINDIR)/$(BINARY)
 	@echo "Installed to $(BINDIR)/$(BINARY)"
-	@if [ ! -f $(CONFDIR_M7010)/password ] && [ ! -f $(CONFDIR_MUDI)/password ]; then \
-		install -d -m700 $(CONFDIR_M7010) $(CONFDIR_MUDI); \
+	@if [ ! -f $(CONFDIR_M7010)/password ] && [ ! -f $(CONFDIR_M7450)/password ] && [ ! -f $(CONFDIR_MUDI)/password ]; then \
+		install -d -m700 $(CONFDIR_M7010) $(CONFDIR_M7450) $(CONFDIR_MUDI); \
 		echo "No password file found. Create one (chmod 600) for whichever device you use:"; \
 		echo "  $(CONFDIR_M7010)/password   (TP-Link M7010)"; \
+		echo "  $(CONFDIR_M7450)/password   (TP-Link M7450)"; \
 		echo "  $(CONFDIR_MUDI)/password    (GL.iNet Mudi GL-E5800)"; \
 	fi
 

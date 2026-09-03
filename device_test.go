@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -63,5 +65,43 @@ func TestProbeMudi(t *testing.T) {
 	defer notMudi.Close()
 	if probeMudi(testAddr(notMudi), time.Second) {
 		t.Error("non-Mudi HTTP server misidentified as Mudi")
+	}
+}
+
+func TestRefineDeviceFromReportedModel(t *testing.T) {
+	m7010 := findDeviceByID("m7010")
+	m7450 := findDeviceByID("m7450")
+	mudi := findDeviceByID("mudi")
+
+	if got := refineDevice(m7010, &Status{Model: "M7450"}); got != m7450 {
+		t.Errorf("M7450 status refined to %v, want m7450", got)
+	}
+	if got := refineDevice(m7450, &Status{Model: "m7010"}); got != m7010 {
+		t.Errorf("M7010 status refined to %v, want m7010", got)
+	}
+	if got := refineDevice(mudi, &Status{Model: "M7450"}); got != mudi {
+		t.Errorf("unrelated protocol changed from mudi to %v", got)
+	}
+	if got := refineDevice(m7010, &Status{Model: "unknown"}); got != m7010 {
+		t.Errorf("unknown model changed device to %v", got)
+	}
+}
+
+func TestM7450PasswordFallsBackToSharedTPLinkFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("M7450_PASS", "")
+	t.Setenv("TPLINK_PASS", "")
+	t.Setenv("M7010_PASS", "")
+
+	path := filepath.Join(dir, "tplink-m7010", "password")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("shared-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolvePassword(findDeviceByID("m7450"), ""); got != "shared-secret" {
+		t.Errorf("M7450 fallback password = %q, want shared-secret", got)
 	}
 }

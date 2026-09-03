@@ -1,6 +1,6 @@
 # Architecture
 
-Six Go files, one binary. Two router families share the data model and
+One binary serves three hotspot models. Two protocol families share the data model and
 output formatters; the protocol-specific code is isolated behind the
 `Device` interface.
 
@@ -33,6 +33,7 @@ every mode goes through:
      └── parallel d.Probe() of every resolved address (500ms timeout)
    openDevice(d, ...)      -- resolveAddr + resolvePassword + d.New().Connect()
    dev.Fetch()             -- protocol-specific RPCs (Mudi: RPC + WS) → *Status
+   refineDevice(d, status) -- distinguish M7010/M7450 from reported model
    (dev.Close()            -- best-effort logout, async-safe)
 ```
 
