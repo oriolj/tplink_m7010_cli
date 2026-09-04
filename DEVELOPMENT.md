@@ -135,7 +135,8 @@ per-device env vars (`M7010_PASS` / `MUDI_PASS`) and password files
 (`~/.config/tplink-m7010/password` / `~/.config/gl-e5800/password`) are
 discovered from one place. `TPLINK_PASS` / `TPLINK_ADDR` / `GLINET_PASS`
 are accepted as alternate spellings — none is preferred, neither file
-path is preferred. Both devices are first-class.
+path is preferred. At that point both devices were first-class; Attempt 12
+later added the M7450.
 
 ## Attempt 8 — review hardening: protocol probes, RFC-clean WS, unit tests
 
@@ -290,3 +291,34 @@ directly, so a test driving the real entry point crowded every reading
 into one second — every interval zero-length, nothing banked, and the
 test failed for a reason that had nothing to do with the logic. `time.Now`
 is now an indirected var.
+
+## Attempt 12 — M7450 as a distinct model on a shared protocol
+
+The M7450 answered the existing M7010 client immediately: same
+`/cgi-bin/auth_cgi` hello, AES+RSA envelope, status modules, and default
+`192.168.0.1` address. Its authenticated status identified the hardware as
+`M7450`, and the router's own web JavaScript confirmed `wan.networkType: 7`
+means LTE+.
+
+Merely adding another registry entry was not enough. The unauthenticated
+hello contains no model, so both TP-Link entries have the same probe and
+address; deterministic autodetect necessarily selects the first one. That
+rendered an M7450 as M7010 and, more importantly, mixed its samples into the
+M7010 battery pool with the wrong 8-hour datasheet prior.
+
+What stuck:
+
+- Keep the cheap unauthenticated probe as a protocol-family check.
+- After the authenticated Fetch, map `deviceInfo.model` through
+  `refineDevice` before rendering or recording battery state.
+- Give M7450 its own `m7450` ID/history pool and its published 15-hour
+  runtime. Existing M7450 samples recorded under `m7010` are deliberately
+  not migrated because they cannot be distinguished from genuine M7010
+  history.
+- Add `M7450_PASS` / `M7450_ADDR` and a `tplink-m7450/password` path, while
+  falling back to the old M7010 spellings/path for installations that used
+  the shared client before first-class M7450 support.
+
+Live verification against firmware `3.0.3 Build 251119 Rel.1012n` confirmed
+autodetect emits `device: m7450`, `network_type: 4G+`, and a cold estimate
+based on 15 hours. No power actions were sent during testing.

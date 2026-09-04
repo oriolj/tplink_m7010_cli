@@ -4,8 +4,9 @@
 
 | Path                                     | Contents                                    | Perms |
 | ---------------------------------------- | ------------------------------------------- | ----- |
-| `~/.local/bin/tplink-m7010`              | Compiled binary (autodetects M7010 / Mudi)  | 755   |
+| `~/.local/bin/tplink-m7010`              | Compiled binary (autodetects M7010 / M7450 / Mudi) | 755 |
 | `~/.config/tplink-m7010/password`        | M7010 admin password, one line              | 600   |
+| `~/.config/tplink-m7450/password`        | M7450 admin password, one line              | 600   |
 | `~/.config/gl-e5800/password`            | Mudi (GL-E5800) admin password, one line    | 600   |
 | `~/.config/waybar/scripts/mifi.sh`       | Wrapper used by the module                  | 755   |
 | `~/.config/waybar/scripts/mifi-tui.sh`   | on-click handler — opens TUI in `$TPLINK_TERM` (default `ghostty`); no password handling, the binary resolves its own | 755 |
@@ -57,18 +58,19 @@ pkill -SIGUSR2 waybar     # waybar reloads config on SIGUSR2
   `~/.local/bin/tplink-m7010 --waybar`. An empty JSON object means
   autodetect didn't find a supported router. Check `ip route show default`
   — autodetect prefers a default gateway that matches a known device IP
-  (`192.168.0.1` for M7010, `192.168.8.1` for Mudi) and then confirms
+  (`192.168.0.1` for M7010/M7450, `192.168.8.1` for Mudi) and then confirms
   the device actually speaks the expected protocol with one
   unauthenticated HTTP probe.
-- **"login failed" / "Access denied"** — wrong password. For the M7010,
+- **"login failed" / "Access denied"** — wrong password. For TP-Link,
   `result: 1` on step 2 is `DontMatch`. Re-check the password file
-  (`~/.config/tplink-m7010/password` or `~/.config/gl-e5800/password` —
+  (`~/.config/tplink-m7010/password`, `~/.config/tplink-m7450/password`,
+  or `~/.config/gl-e5800/password` —
   no trailing newline issues; readers trim them).
 - **Garbled output / decrypt errors after firmware update** — TP-Link or
   GL.iNet may have changed the transport. Re-run with `--debug --raw` and
-  compare against the examples in `PROTOCOL.md` (M7010) or
+  compare against the examples in `PROTOCOL.md` (M7010/M7450) or
   `PROTOCOL_GLINET.md` (Mudi).
 - **Wrong device picked by autodetect** — force a specific device with
-  `--device m7010` / `--device mudi`. If autodetect is wrong because two
-  routers' default IPs are both accepted on the LAN, the default-gateway
+  `--device m7010` / `--device m7450` / `--device mudi`. If autodetect is
+  wrong because two routers' default IPs are both accepted on the LAN, the default-gateway
   signal should be reliable; if it isn't, file a bug.

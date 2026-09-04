@@ -8,7 +8,7 @@ output formatters; the protocol-specific code is isolated behind the
 | ----------- | ----------------------------------------------------------- |
 | `main.go`   | Flags, mode dispatch, TUI, waybar/noctalia formatters       |
 | `device.go` | `Device` interface, device registry, autodetect, passwords  |
-| `client.go` | TP-Link M7010 client (AES+RSA envelope)                     |
+| `client.go` | TP-Link M7010/M7450 client (AES+RSA envelope)               |
 | `mudi.go`   | GL.iNet Mudi client (JSON-RPC + WebSocket event collection) |
 | `ws.go`     | Minimal hand-rolled WebSocket client used by `mudi.go`      |
 | `crypt.go`  | SHA-256 crypt(3) for the Mudi challenge/response            |
@@ -54,10 +54,10 @@ type Device interface {
 }
 ```
 
-Both `*Client` (M7010) and `*MudiClient` implement it. Adding a third
-device is a matter of writing another file and appending an entry to
-`supportedDevices` in `device.go` — the full checklist is at the end of
-this document.
+`*Client` implements it for both TP-Link models; `*MudiClient` implements
+it for the Mudi. A new model can reuse an existing client when its protocol
+matches, as the M7450 does, or add another implementation. The full checklist
+is at the end of this document.
 
 ## Autodetect (the laptop-battery story)
 
@@ -76,6 +76,12 @@ unauthenticated HTTP round-trip that checks the *protocol*, not just
 TCP reachability (`probeM7010` sends the step-1 hello and looks for
 the nonce; `probeMudi` sends a `challenge` and looks for salt+nonce).
 
+The TP-Link hello identifies the protocol, not the model: M7010 and M7450
+both use it at `192.168.0.1`. Autodetect therefore starts with the M7010
+family entry, then `refineDevice` switches to the model reported by
+authenticated `deviceInfo.model`. This happens before rendering or battery
+tracking, so M7450 output and learned history use the `m7450` identity.
+
 This matters twice over:
 
 - `192.168.0.1:80` is often "accepted" by upstream NAT without anything
@@ -88,7 +94,7 @@ This matters twice over:
 
 ## Client state
 
-### `Client` (M7010)
+### `Client` (M7010/M7450)
 
 ```
 addr         "192.168.0.1"
@@ -118,7 +124,7 @@ key material is held client-side.
 
 ## Request helpers
 
-### M7010 (`client.go`)
+### M7010/M7450 (`client.go`)
 
 - `postRaw(endpoint, body)` — send bytes, read bytes, log if `debug`.
 - `encryptedRequest(endpoint, payload)` — build `{data, sign}` envelope
@@ -140,8 +146,8 @@ A flat container shared by both protocols:
 Model, Firmware, Operator        -- device labels
 NetworkType, Band, ConnectStatus -- WAN
 SignalStrength, RSRP, RSRQ,
-  RSSI, SNR                       -- coverage (M7010: signalStrength=0,
-                                                derived from RSRP)
+  RSSI, SNR                       -- coverage (TP-Link: signalStrength=0,
+                                                 derived from RSRP)
 WanIP                            -- WAN IPv4
 BatteryPercent, BatteryCharging  -- battery
 TxSpeed, RxSpeed                 -- current throughput
@@ -207,7 +213,7 @@ Standard Elm-ish shape:
   -125…-75 dBm scale (same span as `rsrpToSignal`), so the shape is
   comparable across sessions — useful when physically repositioning
   the hotspot.
-- **Throughput**: the M7010 reports split rx/tx speeds directly; the
+- **Throughput**: the TP-Link models report split rx/tx speeds directly; the
   Mudi only exposes a total-traffic counter, so `computeRate` derives
   a combined rate from the per-tick delta (0 on counter resets).
 - Colors are `lipgloss.AdaptiveColor` pairs, so the dashboard is
@@ -301,10 +307,12 @@ one new file. In order:
    autodetect section above for why.
 4. **Registry entry in `supportedDevices`** (`device.go`): ID, Title,
    DefaultAddr, `AddrEnvs` + `PasswordEnvs` (primary spelling first),
-   `PasswordPath` under `~/.config/`, `New`, `Probe`, and
+   `PasswordPaths` under `~/.config/`, `New`, `Probe`, and
    `TypicalRuntime` (the vendor's published battery life — it bootstraps
    the remaining-time estimate; omit it and the device simply shows no
    time until the rate has been measured).
+   If multiple models share a probe, add their authenticated model mapping
+   to `refineDevice` so output and state become model-specific after Fetch.
 5. **Tests** — a fake-device test in the style of
    `m7010_envelope_test.go` / `mudi_envelope_test.go` (httptest server
    speaking the server side of the protocol), plus unit tests for any

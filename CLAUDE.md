@@ -51,7 +51,7 @@ Passwords come from one of:
 supported router is reachable so the widget collapses, without paying a
 login-timeout cost.
 
-## Before touching the M7010 crypto
+## Before touching the TP-Link crypto
 
 Read `PROTOCOL.md` end-to-end. The wire format is not obvious and the
 three public reverse-engineering projects (M7350 C++, M7200 PHP, M7010 —
@@ -76,7 +76,7 @@ gl-sdk4-* package list, and live probing. Key things:
 
 ## Things that were surprisingly hard and will bite again
 
-### M7010 (TP-Link)
+### M7010 / M7450 (TP-Link)
 
 1. **Go `crypto/rsa` refuses <1024-bit keys**. The M7010 ships a
    512-bit key. `rsaEncryptBlock` in `client.go` is a hand-rolled
@@ -100,7 +100,7 @@ gl-sdk4-* package list, and live probing. Key things:
 
 ### Remaining battery time
 
-1. **Both devices report an integer percent and nothing else** — no
+1. **All three devices report an integer percent and nothing else** — no
    current, no voltage, no time. The estimate is derived, so treat
    `TypicalRuntime` in the device registry as a documented datasheet
    figure (M7010 8 h, M7450 15 h, Mudi 7 13.5 h), not a measurement.
@@ -155,7 +155,7 @@ gl-sdk4-* package list, and live probing. Key things:
 
 ## Where things live
 
-- `client.go`   — M7010 HTTP + crypto + response parsing. `Client`
+- `client.go`   — M7010/M7450 HTTP + crypto + response parsing. `Client`
                   type implements the `Device` interface. Also
                   `probeM7010` for autodetect.
 - `mudi.go`     — Mudi JSON-RPC client + WS cellular collection.
@@ -185,7 +185,7 @@ gl-sdk4-* package list, and live probing. Key things:
 - `*_test.go`   — Unit tests for the pure helpers, probes, crypt, and
                   the WS frame parser. `make test`.
 - `Makefile`    — `build / install / install-waybar / run / raw / test / vet / tidy`.
-- `PROTOCOL.md` — TP-Link M7010 wire format.
+- `PROTOCOL.md` — TP-Link M7010/M7450 wire format.
 - `PROTOCOL_GLINET.md` — GL.iNet Mudi (GL-E5800) JSON-RPC + WS events.
 - `ARCHITECTURE.md` — Code structure, autodetect design, WS path.
 - `DEVELOPMENT.md`  — Build log: what was tried, what failed, what stuck.
@@ -202,8 +202,9 @@ gl-sdk4-* package list, and live probing. Key things:
 ```sh
 make raw                                # whichever device is on the LAN
 ./tplink-m7010 --device mudi --raw      # force Mudi
+./tplink-m7010 --device m7450 --raw     # force M7450
 ./tplink-m7010 --device m7010 --raw     # force M7010
-./tplink-m7010 --debug --raw            # show HTTP traffic (M7010 includes crypto)
+./tplink-m7010 --debug --raw            # show HTTP traffic (TP-Link includes crypto)
 ```
 
 `make test` runs the unit suite: `sha256Crypt` (openssl-verified
@@ -227,6 +228,11 @@ response and assert it on `Status`. Live devices are still the final
 word for anything the fakes only *assume* (firmware quirks, timing).
 CI (`.github/workflows/ci.yml`) runs gofmt + vet + test + build on
 every push/PR.
+
+M7010 and M7450 cannot be distinguished by the unauthenticated hello.
+`refineDevice` must run after Fetch and before rendering/battery tracking;
+otherwise an autodetected M7450 inherits the M7010 title, 8-hour runtime,
+and battery-history bucket.
 
 **Live testing tips:**
 

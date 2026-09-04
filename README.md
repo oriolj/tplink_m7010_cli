@@ -15,7 +15,7 @@ same code:
 The same binary autodetects which device is on the LAN — it prefers the
 default-gateway match and falls back to probing the known addresses in parallel.
 Both signals are confirmed with a cheap unauthenticated **protocol probe**
-(the M7010 hello / the Mudi challenge), so a home router that happens to
+(the TP-Link hello / the Mudi challenge), so a home router that happens to
 live at 192.168.0.1 is not mistaken for a hotspot. If neither hotspot is
 reachable, widget modes emit empty JSON and exit quickly so the laptop
 battery isn't burned on doomed retries.
@@ -36,7 +36,7 @@ The TUI adds a few things the widgets don't show:
 
 - **RSRP history sparkline** (fixed dBm scale) — watch the signal react
   while physically repositioning the hotspot
-- **Live throughput** — reported directly by the M7010; derived from the
+- **Live throughput** — reported directly by the TP-Link models; derived from the
   traffic-counter delta on the Mudi
 - **Data-limit gauge** and today's usage
 - **Stale-data handling** — a failed refresh keeps the last-known data on
@@ -54,7 +54,7 @@ The TUI adds a few things the widgets don't show:
 | Raw dump   | `--raw`           | Pretty-printed raw API responses (per device) |
 | Power off  | `--poweroff`      | Shut the router down                         |
 | Reboot     | `--reboot`        | Restart the router                           |
-| Debug      | `--debug`         | Dumps HTTP traffic (plus crypto for M7010)   |
+| Debug      | `--debug`         | Dumps HTTP traffic (plus crypto for TP-Link) |
 
 ## Flags
 
@@ -218,7 +218,7 @@ Two related notes:
   / `TPLINK_ADDR` / `GLINET_ADDR`) are honoured by autodetect too — the gateway match and
   the probe both use the resolved address, not just the factory default.
 - **Widget modes don't log out** (saves a round-trip per tick; the router
-  ages sessions out on its own). On the M7010, which allows one active web
+  ages sessions out on its own). On the TP-Link models, which allow one active web
   session at a time, this can keep the browser UI locked out until the
   token expires — log in from the TUI or wait a minute if that bites.
 
@@ -235,7 +235,7 @@ see `NOCTALIA.md`.
 
 ## Protocol notes
 
-- `PROTOCOL.md` — TP-Link M7010 wire format (AES+RSA envelope).
+- `PROTOCOL.md` — TP-Link M7010/M7450 wire format (AES+RSA envelope).
 - `PROTOCOL_GLINET.md` — GL.iNet Mudi (GL-E5800) JSON-RPC, challenge hash,
   service catalog probed so far.
 
@@ -247,7 +247,7 @@ specific landmines.
 | File                  | Covers                                                                 |
 | --------------------- | ---------------------------------------------------------------------- |
 | `README.md`           | This file — what it is, how to run it                                  |
-| `PROTOCOL.md`         | TP-Link M7010 wire format                                              |
+| `PROTOCOL.md`         | TP-Link M7010/M7450 wire format                                        |
 | `PROTOCOL_GLINET.md`  | GL.iNet Mudi (GL-E5800) JSON-RPC                                       |
 | `ARCHITECTURE.md`     | Code structure, multi-device flow, TUI model                           |
 | `WAYBAR.md`           | Waybar setup on this specific machine                                  |
@@ -260,7 +260,7 @@ specific landmines.
 
 - `main.go`     — CLI entry, flag parsing, waybar/noctalia/raw/TUI modes
 - `device.go`   — `Device` interface, supported-device registry, autodetect
-- `client.go`   — TP-Link M7010 client (AES-128-CBC + RSA-PKCS1v15)
+- `client.go`   — TP-Link M7010/M7450 client (AES-128-CBC + RSA-PKCS1v15)
 - `mudi.go`     — GL.iNet Mudi (GL-E5800) JSON-RPC client
 - `ws.go`       — Minimal WebSocket client for the Mudi's `/ws` event stream
 - `crypt.go`    — Pure-Go SHA-256 crypt(3) for the GL.iNet challenge/response

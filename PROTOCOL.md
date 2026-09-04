@@ -1,4 +1,4 @@
-# TP-Link M7010 web API — reverse-engineered notes
+# TP-Link M7010/M7450 web API — reverse-engineered notes
 
 This documents what we figured out while making `tplink-m7010` work against a
 real device (firmware `3.0.3 Build 250814 Rel.1021n`, HW `M7010(EU) v3.2`).
@@ -7,9 +7,9 @@ The same envelope is confirmed on an M7450 running firmware
 Much of this is undocumented; the few resources on the open internet target
 the M7350 or M7200 and partially differ from the M7010.
 
-> The other device this binary supports — the GL.iNet Mudi GL-E5800 — has
+> The other protocol family this binary supports — the GL.iNet Mudi GL-E5800 — has
 > its own wire format and notes at `PROTOCOL_GLINET.md`. Everything below
-> is M7010-specific.
+> applies to the confirmed M7010/M7450 transport.
 
 ## Endpoints
 
@@ -109,7 +109,7 @@ h=<md5('admin'+password)>&s=<seqNum + len(base64(aes_ciphertext))>
   alphabetically in Go — PHP's `http_build_query` preserves insertion order.
   We had garbage AES responses until we matched the PHP order (`key,iv,h,s`).
 - **`seqNum` may appear as a JSON number**, not a string. Handle both.
-- **The M7010 firmware always returns `signalStrength: 0`**. The real signal
+- **The tested TP-Link firmware returns `signalStrength: 0`**. The real signal
   quality lives in `rsrp` (dBm). We map RSRP → 0-5 bars ourselves:
   `≥-80 = 5, ≥-90 = 4, ≥-100 = 3, ≥-110 = 2, ≥-120 = 1, else 0`.
 - **`battery.voltage` is actually the battery percent**, not a voltage. The
@@ -122,7 +122,7 @@ h=<md5('admin'+password)>&s=<seqNum + len(base64(aes_ciphertext))>
 Reverse-engineered from `tp_m7350_enums.h` in `vpaeder/tplink_m7350_cpp`.
 Numbers below are the `action` values inside each module. Not exhaustive — we
 only use `status`/`flowstat`/`authenticator`/`reboot`, the rest are untested
-on the M7010 but likely share the convention.
+on the tested M7010/M7450 firmware but likely share the convention.
 
 | Module        | String              | Key actions                                                                   |
 | ------------- | ------------------- | ----------------------------------------------------------------------------- |
